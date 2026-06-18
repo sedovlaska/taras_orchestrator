@@ -38,6 +38,7 @@ Open `http://localhost:8000`.
 - `GET /tools` returns the typed tool inventory with current policy decisions.
 - `GET /runs` returns recent chat runs from the local audit log.
 - `GET /runs/summary` returns aggregate run analytics for the browser dashboard.
+- `GET /runs/{run_id}/trace` exports a run as structured trace data and Markdown.
 - `GET /runs/{run_id}` returns one stored run with its route metadata.
 - `GET /runs/{run_id}/events` returns the persisted event timeline for a run.
 - `GET /approvals` returns pending or historical tool approvals.
@@ -130,6 +131,10 @@ database is written under `.data/run_history.sqlite3`, which is ignored by Git.
 
 The browser UI also shows summary analytics derived from the audit log: total runs, status counts,
 agent usage, approval status counts, event counts, and recent runner errors.
+
+Each run can also be exported as a Markdown trace with route details, policy decisions, event
+timeline, final answer, and compact event payloads. This is intended for issue reports and PR
+debugging without granting direct database access.
 
 ## Development Notes
 

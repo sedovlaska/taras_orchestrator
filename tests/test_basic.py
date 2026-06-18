@@ -392,6 +392,7 @@ def test_index_exposes_runbook_controls():
     assert 'id="context-file-btn"' in html
     assert 'id="context-pack-save-btn"' in html
     assert 'id="diagnostics-refresh-btn"' in html
+    assert "exportRunTrace" in html
 
 
 def test_run_history_store_persists_runs_and_events(tmp_path):
@@ -473,6 +474,49 @@ def test_run_summary_api_uses_current_history_store(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert payload["total_runs"] == 1
     assert payload["by_status"] == [{"status": "completed", "count": 1}]
+
+
+def test_run_trace_export_includes_route_policy_and_timeline(tmp_path):
+    from orchestrator.trace_export import build_run_trace
+
+    store = RunHistoryStore(tmp_path / "runs.sqlite3")
+    route = route_request("please lint this code").as_dict()
+    run = store.create_run("please lint this code", route)
+    store.append_event(run["id"], "route", route)
+    store.append_event(
+        run["id"],
+        "policy_decision",
+        {"tool_id": "code.lint_code", "allowed": True, "risk": "medium", "reason": "test"},
+    )
+    store.complete_run(run["id"], "done")
+
+    trace = build_run_trace(store, run["id"])
+
+    assert trace["run"]["id"] == run["id"]
+    assert trace["timeline"][0]["title"] == "Route to code"
+    assert "## Policy Decisions" in trace["markdown"]
+    assert "code.lint_code" in trace["markdown"]
+    assert build_run_trace(store, "missing") is None
+
+
+def test_run_trace_api_uses_current_history_store(tmp_path, monkeypatch):
+    import orchestrator.server as server
+
+    store = RunHistoryStore(tmp_path / "runs.sqlite3")
+    monkeypatch.setattr(server, "run_history", store)
+    route = route_request("cpu status").as_dict()
+    run = store.create_run("cpu status", route)
+    store.append_event(run["id"], "route", route)
+    store.complete_run(run["id"], "done")
+    client = TestClient(server.app)
+
+    response = client.get(f"/runs/{run['id']}/trace")
+    missing = client.get("/runs/missing/trace")
+
+    assert response.status_code == 200
+    assert response.json()["trace"]["run"]["id"] == run["id"]
+    assert "# Run Trace:" in response.json()["trace"]["markdown"]
+    assert missing.status_code == 404
 
 
 def test_chat_api_requires_approval_before_medium_risk_tools(tmp_path, monkeypatch):
