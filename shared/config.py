@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     workspace_max_file_chars: int = 40_000
     workspace_max_search_results: int = 100
     context_bundle_max_chars: int = 12_000
+    conversation_context_max_chars: int = 12_000
     context_pack_db_path: str = ".data/context_packs.sqlite3"
     conversations_db_path: str = ".data/conversations.sqlite3"
 

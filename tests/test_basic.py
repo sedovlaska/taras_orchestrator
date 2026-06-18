@@ -864,6 +864,35 @@ def test_conversation_api_crud_and_multi_turn_context(tmp_path, monkeypatch):
     assert missing_chat.status_code == 404
 
 
+def test_conversation_context_bounds_transcript_dropping_oldest(tmp_path, monkeypatch):
+    import orchestrator.server as server
+    from orchestrator.conversations import ConversationStore
+
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    monkeypatch.setattr(server, "conversation_store", store)
+    monkeypatch.setattr(settings, "conversation_context_max_chars", 200)
+
+    convo = store.create_conversation("Long thread")
+    convo_id = convo["id"]
+    # Oldest turn carries a unique marker; many large turns follow.
+    store.append_message(convo_id, "user", "OLDEST_TURN_MARKER " + "x" * 100)
+    for i in range(20):
+        store.append_message(convo_id, "user", f"filler turn {i} " + "y" * 100)
+    store.append_message(convo_id, "assistant", "MOST_RECENT_MARKER " + "z" * 50)
+
+    current = "what is the disk usage right now?"
+    result = server.conversation_context(convo_id, current)
+
+    # Current message is always present, in full.
+    assert f"Current user message: {current}" in result
+    # Most recent prior turn is retained, oldest is dropped.
+    assert "MOST_RECENT_MARKER" in result
+    assert "OLDEST_TURN_MARKER" not in result
+    # The bounded prior-transcript portion stays within the configured limit.
+    prior = result.split("Prior conversation:\n", 1)[1].split("\n\nCurrent user message:", 1)[0]
+    assert len(prior) <= settings.conversation_context_max_chars
+
+
 async def test_event_queue():
     queue = EventQueue()
     await queue.emit(StreamEvent(event="test", data={"key": "value"}))

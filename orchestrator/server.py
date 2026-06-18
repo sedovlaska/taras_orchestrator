@@ -113,7 +113,15 @@ def conversation_context(conversation_id: str | None, message: str) -> str:
     history = conversation_store.list_messages(conversation_id)
     if not history:
         return message
-    transcript = "\n".join(f"{turn['role']}: {turn['content']}" for turn in history)
+    lines = [f"{turn['role']}: {turn['content']}" for turn in history]
+    # Bound the prior-turns transcript, dropping oldest turns first so the most
+    # recent context survives. The current user message is always included in full.
+    limit = settings.conversation_context_max_chars
+    while lines and len("\n".join(lines)) > limit:
+        lines.pop(0)
+    transcript = "\n".join(lines)
+    if not transcript:
+        return message
     return (
         "Prior conversation:\n"
         f"{transcript}\n\n"
