@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AGNO Team Orchestrator</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f0f0f;
+      color: #e0e0e0;
+      height: 100vh;
+      display: flex;
+    }
+
+    #sidebar {
+      width: 232px;
+      background: #191928;
+      border-right: 1px solid #2a2a4a;
+      display: flex;
+      flex-direction: column;
+      padding: 16px;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+
+    #sidebar h2 {
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #8a8a9a;
+      margin-bottom: 4px;
+    }
+
+    .agent-status {
+      --agent-color: #3b82f6;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 48px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: #101016;
+      border: 1px solid transparent;
+      transition: background 0.2s, border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+    }
+
+    .agent-status:hover { background: #20202a; }
+
+    .agent-status.active {
+      background: #171923;
+      border-color: var(--agent-color);
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--agent-color) 50%, transparent), 0 0 18px color-mix(in srgb, var(--agent-color) 34%, transparent);
+      transform: translateX(2px);
+    }
+
+    .agent-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .agent-dot.online { background: #4ade80; box-shadow: 0 0 6px #4ade8066; }
+    .agent-dot.offline { background: #ef4444; }
+    .agent-dot.checking { background: #fbbf24; animation: pulse 1s infinite; }
+    .agent-status.active .agent-dot { background: var(--agent-color); box-shadow: 0 0 10px var(--agent-color); animation: pulse 0.9s infinite; }
+
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+    .agent-info { display: flex; flex-direction: column; min-width: 0; }
+    .agent-name { font-size: 13px; font-weight: 600; color: #e0e0e0; }
+    .agent-url { font-size: 10px; color: #666; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .agent-status.active .agent-name { color: #fff; }
+    .agent-status.active .agent-url { color: var(--agent-color); }
+
+    .status-summary {
+      margin-top: auto;
+      padding: 10px;
+      border-radius: 8px;
+      background: #101016;
+      text-align: center;
+    }
+
+    .status-summary .count { font-size: 24px; font-weight: 700; color: #4ade80; }
+    .status-summary .label { font-size: 11px; color: #666; }
+
+    .refresh-btn {
+      background: transparent;
+      border: 1px solid #2a2a4a;
+      border-radius: 6px;
+      padding: 6px;
+      color: #777;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .refresh-btn:hover { border-color: #3b82f6; color: #3b82f6; }
+
+    #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+    header {
+      background: #191928;
+      padding: 16px 24px;
+      border-bottom: 1px solid #2a2a4a;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    header h1 { font-size: 18px; font-weight: 600; color: #fff; }
+
+    #chat-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .message {
+      max-width: 80%;
+      padding: 12px 16px;
+      border-radius: 12px;
+      line-height: 1.5;
+      font-size: 14px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+
+    .message.user { align-self: flex-end; background: #3b82f6; color: #fff; border-bottom-right-radius: 4px; }
+    .message.assistant { align-self: flex-start; background: #1e1e2e; border: 1px solid #2a2a4a; border-bottom-left-radius: 4px; }
+    .message.system { align-self: center; background: transparent; color: #777; font-size: 12px; padding: 4px 8px; }
+    .message.error { align-self: flex-start; background: #2d1b1b; border: 1px solid #5c2b2b; color: #f87171; border-bottom-left-radius: 4px; }
+
+    .agent-badge {
+      display: inline-block;
+      background: #7c3aed;
+      color: #fff;
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      margin-bottom: 6px;
+      font-weight: 500;
+    }
+
+    .agent-badge.multi { background: #f59e0b; color: #000; }
+    .agent-badge.code { background: #3b82f6; }
+    .agent-badge.system { background: #10b981; }
+    .agent-badge.devops { background: #ef4444; }
+    .agent-badge.db { background: #f97316; }
+    .agent-badge.docs { background: #8b5cf6; }
+    .agent-badge.docker { background: #06b6d4; }
+    .agent-badge.offline { background: #555; text-decoration: line-through; }
+
+
+    .markdown-body h1,
+    .markdown-body h2,
+    .markdown-body h3 {
+      color: #fff;
+      line-height: 1.25;
+      margin: 12px 0 8px;
+    }
+
+    .markdown-body h1 { font-size: 22px; }
+    .markdown-body h2 { font-size: 18px; border-bottom: 1px solid #33364a; padding-bottom: 6px; }
+    .markdown-body h3 { font-size: 15px; color: #d6d8ff; }
+    .markdown-body p { margin: 8px 0; }
+    .markdown-body ul,
+    .markdown-body ol { margin: 8px 0 8px 20px; }
+    .markdown-body li { margin: 4px 0; }
+    .markdown-body code {
+      background: #111827;
+      border: 1px solid #263143;
+      border-radius: 5px;
+      padding: 1px 5px;
+      color: #f8fafc;
+      font-family: Consolas, 'SFMono-Regular', monospace;
+      font-size: 13px;
+    }
+    .markdown-body pre {
+      background: #0b1020;
+      border: 1px solid #263143;
+      border-radius: 8px;
+      padding: 12px;
+      overflow-x: auto;
+      margin: 10px 0;
+    }
+    .markdown-body pre code { border: 0; padding: 0; background: transparent; }
+    .markdown-body blockquote {
+      border-left: 3px solid #8b5cf6;
+      margin: 10px 0;
+      padding: 6px 12px;
+      color: #c7c9d8;
+      background: #171724;
+    }
+    .markdown-body a { color: #60a5fa; text-decoration: none; }
+    .markdown-body a:hover { text-decoration: underline; }
+    .markdown-body hr { border: 0; border-top: 1px solid #33364a; margin: 14px 0; }
+
+    .typing-indicator { align-self: flex-start; display: flex; gap: 4px; padding: 12px 16px; }
+    .typing-indicator span { width: 6px; height: 6px; border-radius: 50%; background: #666; animation: bounce 1.4s infinite ease-in-out; }
+    .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+    .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+
+    #input-area { padding: 16px 24px; background: #191928; border-top: 1px solid #2a2a4a; display: flex; gap: 12px; }
+    #user-input { flex: 1; background: #0f0f0f; border: 1px solid #2a2a4a; border-radius: 8px; padding: 12px 16px; color: #fff; font-size: 14px; outline: none; resize: none; font-family: inherit; }
+    #user-input:focus { border-color: #3b82f6; }
+    #send-btn { background: #3b82f6; border: none; border-radius: 8px; padding: 12px 20px; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+    #send-btn:hover { background: #2563eb; }
+    #send-btn:disabled { background: #333; cursor: not-allowed; }
+
+    .progress-bar { height: 2px; background: #191928; overflow: hidden; }
+    .progress-bar .fill { height: 100%; background: #3b82f6; width: 0%; transition: width 0.3s; }
+    .progress-bar.active .fill { animation: progress 2s infinite; }
+    @keyframes progress { 0% { width: 0%; margin-left: 0; } 50% { width: 40%; margin-left: 30%; } 100% { width: 0%; margin-left: 100%; } }
+
+    .agents-used { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div id="sidebar">
+    <h2>Agents</h2>
+    <div id="agents-list"></div>
+    <div class="status-summary">
+      <div class="count" id="online-count">-</div>
+      <div class="label">online</div>
+    </div>
+    <button class="refresh-btn" onclick="refreshAgents()">Refresh status</button>
+  </div>
+
+  <div id="main">
+    <header><h1>AGNO Team Orchestrator</h1></header>
+    <div class="progress-bar" id="progress"><div class="fill"></div></div>
+    <div id="chat-container"><div class="message system">Ask me anything. AGNO will route to the right team member.</div></div>
+    <div id="input-area">
+      <textarea id="user-input" rows="1" placeholder="Type a message..." autofocus></textarea>
+      <button id="send-btn">Send</button>
+    </div>
+  </div>
+
+  <script>
+    const container = document.getElementById('chat-container');
+    const input = document.getElementById('user-input');
+    const sendBtn = document.getElementById('send-btn');
+    const progress = document.getElementById('progress');
+    const agentsList = document.getElementById('agents-list');
+    const onlineCount = document.getElementById('online-count');
+
+    const AGENT_COLORS = { code: '#3b82f6', db: '#f97316', devops: '#ef4444', docs: '#8b5cf6', system: '#10b981', docker: '#06b6d4' };
+    const AGENT_NAMES = ['code', 'db', 'devops', 'docs', 'system', 'docker'];
+    let agentStatuses = {};
+    let activeAgentNames = new Set();
+    let activeSince = 0;
+
+    function renderAgents() {
+      agentsList.innerHTML = '';
+      AGENT_NAMES.forEach(name => {
+        const isActive = activeAgentNames.has(name);
+        const online = agentStatuses[name] !== false;
+        const div = document.createElement('div');
+        div.className = `agent-status ${isActive ? 'active' : ''}`;
+        div.id = `agent-${name}`;
+        div.style.setProperty('--agent-color', AGENT_COLORS[name] || '#3b82f6');
+        div.innerHTML = `
+          <div class="agent-dot ${isActive ? '' : (online ? 'online' : 'offline')}"></div>
+          <div class="agent-info">
+            <div class="agent-name">${name}</div>
+            <div class="agent-url">${isActive ? 'running...' : (online ? 'agno-member' : 'offline')}</div>
+          </div>
+        `;
+        agentsList.appendChild(div);
+      });
+    }
+
+    function setActiveAgents(names) {
+      activeAgentNames = new Set((names || []).filter(name => AGENT_NAMES.includes(name)));
+      activeSince = activeAgentNames.size > 0 ? Date.now() : 0;
+      renderAgents();
+    }
+
+    function clearActiveAgentsSoon() {
+      const elapsed = activeSince ? Date.now() - activeSince : 0;
+      const delay = Math.max(0, 1600 - elapsed);
+      setTimeout(() => setActiveAgents([]), delay);
+    }
+
+    async function refreshAgents() {
+      renderAgents();
+      try {
+        const resp = await fetch('/agents/status');
+        const data = await resp.json();
+        let online = 0;
+        data.agents.forEach(agent => {
+          agentStatuses[agent.name] = agent.online;
+          if (agent.online && AGENT_NAMES.includes(agent.name)) online++;
+        });
+        onlineCount.textContent = online;
+        onlineCount.style.color = online > 0 ? '#4ade80' : '#ef4444';
+        renderAgents();
+      } catch (err) {
+        console.error('Failed to fetch agent status:', err);
+      }
+    }
+
+    function escapeHtml(value) {
+      return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function renderInlineMarkdown(text) {
+      let html = escapeHtml(text);
+      html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+      html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+      html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+      return html;
+    }
+
+    function renderMarkdown(markdown) {
+      const lines = markdown.replace(/\r\n/g, '\n').split('\n');
+      const parts = [];
+      let paragraph = [];
+      let listType = null;
+      let inCode = false;
+      let codeLines = [];
+
+      function flushParagraph() {
+        if (paragraph.length) {
+          parts.push(`<p>${renderInlineMarkdown(paragraph.join(' '))}</p>`);
+          paragraph = [];
+        }
+      }
+
+      function closeList() {
+        if (listType) {
+          parts.push(`</${listType}>`);
+          listType = null;
+        }
+      }
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('```')) {
+          if (inCode) {
+            parts.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+            codeLines = [];
+            inCode = false;
+          } else {
+            flushParagraph();
+            closeList();
+            inCode = true;
+          }
+          continue;
+        }
+        if (inCode) {
+          codeLines.push(line);
+          continue;
+        }
+        if (!trimmed) {
+          flushParagraph();
+          closeList();
+          continue;
+        }
+        const heading = trimmed.match(/^(#{1,3})\s+(.+)$/);
+        if (heading) {
+          flushParagraph();
+          closeList();
+          const level = heading[1].length;
+          parts.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+          continue;
+        }
+        if (/^---+$/.test(trimmed)) {
+          flushParagraph();
+          closeList();
+          parts.push('<hr>');
+          continue;
+        }
+        if (trimmed.startsWith('> ')) {
+          flushParagraph();
+          closeList();
+          parts.push(`<blockquote>${renderInlineMarkdown(trimmed.slice(2))}</blockquote>`);
+          continue;
+        }
+        const unordered = trimmed.match(/^[-*]\s+(.+)$/);
+        const ordered = trimmed.match(/^\d+[.)]\s+(.+)$/);
+        if (unordered || ordered) {
+          flushParagraph();
+          const nextType = unordered ? 'ul' : 'ol';
+          if (listType !== nextType) {
+            closeList();
+            parts.push(`<${nextType}>`);
+            listType = nextType;
+          }
+          parts.push(`<li>${renderInlineMarkdown((unordered || ordered)[1])}</li>`);
+          continue;
+        }
+        closeList();
+        paragraph.push(trimmed);
+      }
+      flushParagraph();
+      closeList();
+      if (inCode) parts.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+      return parts.join('');
+    }
+    function addMessage(text, type, agents = null) {
+      const div = document.createElement('div');
+      div.className = `message ${type}`;
+      if (agents && agents.length > 0) {
+        const badges = document.createElement('div');
+        badges.className = 'agents-used';
+        agents.forEach(a => {
+          const badge = document.createElement('span');
+          const isOffline = agentStatuses[a] === false;
+          badge.className = `agent-badge ${a} ${isOffline ? 'offline' : ''}`;
+          badge.textContent = a + (isOffline ? ' (offline)' : '');
+          badges.appendChild(badge);
+        });
+        div.appendChild(badges);
+      }
+      const content = document.createElement('div');
+      if (type === 'assistant') {
+        content.className = 'markdown-body';
+        content.innerHTML = renderMarkdown(text);
+      } else {
+        content.textContent = text;
+      }
+      div.appendChild(content);
+      container.appendChild(div);
+      container.scrollTop = container.scrollHeight;
+      return div;
+    }
+
+    function addTypingIndicator() {
+      const div = document.createElement('div');
+      div.className = 'typing-indicator';
+      div.id = 'typing';
+      div.innerHTML = '<span></span><span></span><span></span>';
+      container.appendChild(div);
+      container.scrollTop = container.scrollHeight;
+    }
+
+    function removeTypingIndicator() { document.getElementById('typing')?.remove(); }
+
+    function setLoading(loading) {
+      sendBtn.disabled = loading;
+      input.disabled = loading;
+      progress.classList.toggle('active', loading);
+
+    }
+
+    async function sendMessage() {
+      const text = input.value.trim();
+      if (!text) return;
+
+      addMessage(text, 'user');
+      input.value = '';
+      setLoading(true);
+      addTypingIndicator();
+
+      const activeAgents = [];
+      let assistantDiv = null;
+
+      try {
+        const response = await fetch('/chat/stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text }),
+        });
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          let eventType = '';
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              eventType = line.slice(7).trim();
+            } else if (line.startsWith('data: ')) {
+              const data = JSON.parse(line.slice(6));
+              switch (eventType) {
+                case 'classify': {
+                  removeTypingIndicator();
+                  activeAgents.push(...data.agents);
+                  setActiveAgents(activeAgents);
+                  const agentInfo = data.agents.map(a => agentStatuses[a] === false ? `${a} (offline)` : a).join(', ');
+                  addMessage(`Routing to: ${agentInfo}`, 'system');
+                  addTypingIndicator();
+                  break;
+                }
+                case 'agent_start': {
+                  if (!activeAgents.includes(data.agent)) activeAgents.push(data.agent);
+                  setActiveAgents(activeAgents);
+                  break;
+                }
+                case 'agent_result': {
+                  if (assistantDiv) assistantDiv.remove();
+                  removeTypingIndicator();
+                  const isError = data.result.toLowerCase().includes('error') || data.result.toLowerCase().includes('connection');
+                  assistantDiv = addMessage(data.result, isError ? 'error' : 'assistant', [data.agent]);
+                  break;
+                }
+                case 'done':
+                  removeTypingIndicator();
+                  if (assistantDiv) assistantDiv.remove();
+                  addMessage(data.answer, 'assistant', activeAgents);
+                  clearActiveAgentsSoon();
+                  break;
+                case 'error':
+                  removeTypingIndicator();
+                  addMessage(`Error: ${data.message}`, 'error');
+                  clearActiveAgentsSoon();
+                  break;
+              }
+            }
+          }
+        }
+      } catch (err) {
+        removeTypingIndicator();
+        addMessage(`Connection error: ${err.message}`, 'error');
+        clearActiveAgentsSoon();
+      } finally {
+        setLoading(false);
+        input.focus();
+      }
+    }
+
+    sendBtn.addEventListener('click', sendMessage);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+    input.addEventListener('input', () => {
+      input.style.height = 'auto';
+      input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+    });
+
+    refreshAgents();
+    setInterval(refreshAgents, 30000);
+  </script>
+</body>
+</html>
