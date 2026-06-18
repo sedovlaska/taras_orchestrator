@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from orchestrator.command_runner import run_command
 from orchestrator.context_bundles import build_context_bundle
 from orchestrator.context_packs import ContextPackStore
+from orchestrator.conversations import ConversationStore
 from orchestrator.diagnostics import build_diagnostics
 from orchestrator.evals import list_eval_cases, run_eval_suite
 from orchestrator.policy import current_policy
@@ -34,9 +35,15 @@ PROJECT_ROOT = Path(__file__).parent.parent
 RunEvent = dict[str, object]
 run_history = RunHistoryStore.from_settings()
 context_pack_store = ContextPackStore.from_settings()
+conversation_store = ConversationStore.from_settings()
 
 class ChatRequest(BaseModel):
     message: str
+    conversation_id: str | None = None
+
+
+class ConversationCreateRequest(BaseModel):
+    title: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -74,6 +81,21 @@ class ContextPackRequest(BaseModel):
 
 def route_agents(message: str) -> list[str]:
     return route_request(message).agents
+
+
+def conversation_context(conversation_id: str | None, message: str) -> str:
+    """Prepend prior conversation turns as context to the current message."""
+    if not conversation_id:
+        return message
+    history = conversation_store.list_messages(conversation_id)
+    if not history:
+        return message
+    transcript = "\n".join(f"{turn['role']}: {turn['content']}" for turn in history)
+    return (
+        "Prior conversation:\n"
+        f"{transcript}\n\n"
+        f"Current user message: {message}"
+    )
 
 
 def initial_run_events(route: RoutingResult) -> list[RunEvent]:
@@ -631,6 +653,34 @@ async def resume_run(run_id: str):
     )
 
 
+@app.post("/conversations")
+async def create_conversation(request: ConversationCreateRequest):
+    return {"conversation": conversation_store.create_conversation(request.title)}
+
+
+@app.get("/conversations")
+async def conversations(limit: int = 50):
+    return {"conversations": conversation_store.list_conversations(limit)}
+
+
+@app.get("/conversations/{conversation_id}")
+async def conversation_detail(conversation_id: str):
+    conversation = conversation_store.get_conversation(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {
+        "conversation": conversation,
+        "messages": conversation_store.list_messages(conversation_id),
+    }
+
+
+@app.delete("/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: str):
+    if not conversation_store.delete_conversation(conversation_id):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"deleted": True}
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     html_file = STATIC_DIR / "index.html"
@@ -639,8 +689,14 @@ async def index():
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
+    conversation_id = request.conversation_id
+    if conversation_id and conversation_store.get_conversation(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    team_input = conversation_context(conversation_id, request.message)
     route = route_request(request.message)
-    run = run_history.create_run(request.message, route.as_dict())
+    run = run_history.create_run(request.message, route.as_dict(), conversation_id=conversation_id)
+    if conversation_id:
+        conversation_store.append_message(conversation_id, "user", request.message)
     initial_events = initial_run_events(route)
     record_events(run["id"], initial_events)
     approvals = create_required_approvals(run["id"], route)
@@ -656,8 +712,10 @@ async def chat(request: ChatRequest):
             run_id=run["id"],
         )
     events: list[RunEvent] = []
-    answer = run_orchestrator(request.message, route, events)
+    answer = run_orchestrator(team_input, route, events)
     record_events(run["id"], events)
+    if conversation_id:
+        conversation_store.append_message(conversation_id, "assistant", answer)
     done_data = {"answer": answer, "intent": route.intent, "agents": route.agents, "route": route.as_dict()}
     run_history.append_event(run["id"], "done", done_data)
     run_history.complete_run(run["id"], answer)
@@ -676,9 +734,16 @@ def _sse(event: str, data: dict) -> str:
 
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
+    conversation_id = request.conversation_id
+    if conversation_id and conversation_store.get_conversation(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
     async def event_generator():
+        team_input = conversation_context(conversation_id, request.message)
         route = route_request(request.message)
-        run = run_history.create_run(request.message, route.as_dict())
+        run = run_history.create_run(request.message, route.as_dict(), conversation_id=conversation_id)
+        if conversation_id:
+            conversation_store.append_message(conversation_id, "user", request.message)
         initial_events = initial_run_events(route)
         for event in initial_events:
             run_history.append_event(run["id"], str(event["event"]), dict(event["data"]))
@@ -706,7 +771,9 @@ async def chat_stream(request: ChatRequest):
             return
         await asyncio.sleep(0.05)
         events: list[RunEvent] = []
-        answer = await asyncio.to_thread(run_orchestrator, request.message, route, events)
+        answer = await asyncio.to_thread(run_orchestrator, team_input, route, events)
+        if conversation_id:
+            conversation_store.append_message(conversation_id, "assistant", answer)
         for event in events:
             run_history.append_event(run["id"], str(event["event"]), dict(event["data"]))
             yield _sse(str(event["event"]), dict(event["data"]))
