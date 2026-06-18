@@ -6,6 +6,7 @@ import type {
   Diagnostics,
   EvalSuite,
   Health,
+  ModelsResponse,
   RunListItem,
   RunSummary,
   Runbook,
@@ -31,6 +32,7 @@ async function jsonRequest<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => jsonRequest<Health>("/health"),
+  models: () => jsonRequest<ModelsResponse>("/models"),
   agents: () => jsonRequest<{ agents: AgentStatus[] }>("/agents/status"),
   runs: () => jsonRequest<{ runs: RunListItem[] }>("/runs?limit=30"),
   run: (runId: string) => jsonRequest<{ run: RunListItem }>(`/runs/${encodeURIComponent(runId)}`),
@@ -109,12 +111,17 @@ export async function streamChat(
     onChunk: (content: string) => void;
     onDone: (payload: { answer?: string; agents_used?: string[] }) => void;
   },
-  conversationId?: string | null
+  conversationId?: string | null,
+  model?: string | null
 ) {
   const response = await fetch("/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message, conversation_id: conversationId || null })
+    body: JSON.stringify({
+      message,
+      conversation_id: conversationId || null,
+      ...(model ? { model } : {})
+    })
   });
 
   if (!response.ok || !response.body) {

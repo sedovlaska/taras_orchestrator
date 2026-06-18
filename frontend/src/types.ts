@@ -11,6 +11,12 @@ export type Health = {
   };
 };
 
+export type ModelsResponse = {
+  models: string[];
+  default_model: string;
+  reachable: boolean;
+};
+
 export type AgentStatus = {
   name: string;
   online: boolean;

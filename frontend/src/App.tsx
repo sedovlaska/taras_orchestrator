@@ -36,6 +36,7 @@ import {
   IconClipboardText,
   IconCode,
   IconCopy,
+  IconCpu,
   IconDatabase,
   IconFileSearch,
   IconHistory,
@@ -292,8 +293,82 @@ function Metric({ label, value, color }: { label: string; value: string | number
   );
 }
 
+function ModelPicker({
+  models,
+  value,
+  defaultModel,
+  reachable,
+  onChange
+}: {
+  models: string[];
+  value: string | null;
+  defaultModel: string | null;
+  reachable: boolean;
+  onChange: (model: string | null) => void;
+}) {
+  const hasModels = reachable && models.length > 0;
+  // Always render the configured default as an option so the picker shows a
+  // real model name even when Ollama is down, rather than an empty dropdown.
+  const options = hasModels ? models : defaultModel ? [defaultModel] : [];
+
+  // When unreachable, the control stays interactive (so its explanatory
+  // tooltip is actually reachable) but pins to the single default option and
+  // wears a warning hue so the degraded state reads at rest, not on hover.
+  const select = (
+    <Select
+      data={options.map((model) => ({ value: model, label: model }))}
+      value={value ?? defaultModel}
+      onChange={onChange}
+      readOnly={!hasModels}
+      allowDeselect={false}
+      checkIconPosition="right"
+      leftSection={<IconCpu size={16} color={hasModels ? undefined : "var(--mantine-color-yellow-4)"} />}
+      placeholder={defaultModel ?? "No model"}
+      aria-label="Model for next message"
+      size="sm"
+      flex="0 1 auto"
+      maw={260}
+      miw={150}
+      styles={
+        hasModels
+          ? undefined
+          : {
+              input: {
+                color: "var(--mantine-color-yellow-2)",
+                borderColor: "color-mix(in srgb, var(--mantine-color-yellow-6) 45%, var(--mantine-color-dark-4))"
+              }
+            }
+      }
+      comboboxProps={{ width: 280, position: "bottom-end" }}
+    />
+  );
+
+  if (hasModels) {
+    return (
+      <Tooltip label="Model for your next message" withArrow position="bottom">
+        {select}
+      </Tooltip>
+    );
+  }
+
+  return (
+    <Tooltip
+      label="Ollama unreachable — sending with the configured default model"
+      withArrow
+      position="bottom"
+      color="yellow"
+    >
+      {select}
+    </Tooltip>
+  );
+}
+
 export function App() {
   const [health, setHealth] = useState<Health | null>(null);
+  const [models, setModels] = useState<string[]>([]);
+  const [defaultModel, setDefaultModel] = useState<string | null>(null);
+  const [modelsReachable, setModelsReachable] = useState(true);
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [agents, setAgents] = useState<AgentStatus[]>([]);
   const [activeAgents, setActiveAgents] = useState<string[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>(welcomeMessages);
@@ -329,7 +404,7 @@ export function App() {
 
   async function refreshAll() {
     try {
-      const [healthData, agentData, runData, summaryData, packsData, runbooksData, conversationsData] =
+      const [healthData, agentData, runData, summaryData, packsData, runbooksData, conversationsData, modelsData] =
         await Promise.all([
           api.health(),
           api.agents(),
@@ -337,9 +412,18 @@ export function App() {
           api.summary(),
           api.contextPacks(),
           api.runbooks(),
-          api.conversations()
+          api.conversations(),
+          api.models()
         ]);
       setHealth(healthData);
+      setModels(modelsData.models || []);
+      setDefaultModel(modelsData.default_model || null);
+      setModelsReachable(modelsData.reachable);
+      // Default the picker to the server's default model; keep an explicit
+      // user choice if it's still a valid option.
+      setSelectedModel((current) =>
+        current && (modelsData.models || []).includes(current) ? current : modelsData.default_model || null
+      );
       setAgents(agentData.agents || []);
       setRuns(runData.runs || []);
       setSummary(summaryData.summary || {});
@@ -620,7 +704,7 @@ export function App() {
             )
           );
         }
-      }, conversationId);
+      }, conversationId, selectedModel);
       refreshAll();
     } catch (error) {
       setMessages((items) =>
@@ -672,6 +756,13 @@ export function App() {
             </Box>
           </Group>
           <Group gap="xs" wrap="nowrap">
+            <ModelPicker
+              models={models}
+              value={selectedModel}
+              defaultModel={defaultModel}
+              reachable={modelsReachable}
+              onChange={setSelectedModel}
+            />
             <Badge color={health?.status === "ok" ? "green" : "gray"} variant="light">
               {health?.status || "loading"}
             </Badge>
