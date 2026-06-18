@@ -209,6 +209,57 @@
       margin-top: 4px;
     }
 
+    .analytics-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+    }
+
+    .metric-box {
+      border: 1px solid #292943;
+      background: #101016;
+      border-radius: 8px;
+      padding: 8px;
+    }
+
+    .metric-value {
+      color: #f5f5f5;
+      font-size: 20px;
+      line-height: 1;
+      font-weight: 750;
+    }
+
+    .metric-label {
+      color: #8a8a9a;
+      font-size: 10px;
+      line-height: 1.3;
+      margin-top: 4px;
+    }
+
+    .analytics-list {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      max-height: 160px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+
+    .analytics-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      color: #c7c9d8;
+      font-size: 11px;
+      line-height: 1.3;
+    }
+
+    .analytics-row span:first-child {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     .runbook-select,
     .runbook-field,
     .runbook-textarea {
@@ -582,6 +633,20 @@
     <div class="history-list" id="history-list">
       <div class="history-empty">No recorded runs yet.</div>
     </div>
+    <h2>Analytics</h2>
+    <div class="analytics-grid">
+      <div class="metric-box">
+        <div class="metric-value" id="metric-total-runs">0</div>
+        <div class="metric-label">runs</div>
+      </div>
+      <div class="metric-box">
+        <div class="metric-value" id="metric-error-runs">0</div>
+        <div class="metric-label">errors</div>
+      </div>
+    </div>
+    <div class="analytics-list" id="analytics-list">
+      <div class="workspace-empty">No analytics yet.</div>
+    </div>
     <h2>Workspace</h2>
     <div class="workspace-controls">
       <input class="workspace-input" id="workspace-query" type="search" placeholder="Search files">
@@ -629,6 +694,9 @@
     const onlineCount = document.getElementById('online-count');
     const timeline = document.getElementById('timeline');
     const historyList = document.getElementById('history-list');
+    const metricTotalRuns = document.getElementById('metric-total-runs');
+    const metricErrorRuns = document.getElementById('metric-error-runs');
+    const analyticsList = document.getElementById('analytics-list');
     const workspaceQuery = document.getElementById('workspace-query');
     const workspaceList = document.getElementById('workspace-list');
     const workspacePreview = document.getElementById('workspace-preview');
@@ -781,8 +849,39 @@
         const resp = await fetch('/runs?limit=20');
         const data = await resp.json();
         renderHistory(data.runs || []);
+        refreshAnalytics();
       } catch (err) {
         historyList.innerHTML = '<div class="history-empty">History unavailable.</div>';
+      }
+    }
+
+    function rowsFromSummary(title, rows, key) {
+      return rows.slice(0, 5).map(row => `
+        <div class="analytics-row">
+          <span>${escapeHtml(title)}: ${escapeHtml(row[key])}</span>
+          <strong>${escapeHtml(String(row.count))}</strong>
+        </div>
+      `).join('');
+    }
+
+    async function refreshAnalytics() {
+      try {
+        const resp = await fetch('/runs/summary');
+        const data = await resp.json();
+        const summary = data.summary || {};
+        const statusErrors = (summary.by_status || [])
+          .filter(row => ['failed', 'denied'].includes(row.status))
+          .reduce((total, row) => total + row.count, 0);
+        metricTotalRuns.textContent = summary.total_runs || 0;
+        metricErrorRuns.textContent = statusErrors + ((summary.recent_errors || []).length || 0);
+        const html = [
+          rowsFromSummary('status', summary.by_status || [], 'status'),
+          rowsFromSummary('agent', summary.by_agent || [], 'agent'),
+          rowsFromSummary('approval', summary.approvals || [], 'status'),
+        ].filter(Boolean).join('');
+        analyticsList.innerHTML = html || '<div class="workspace-empty">No analytics yet.</div>';
+      } catch (err) {
+        analyticsList.innerHTML = '<div class="workspace-empty">Analytics unavailable.</div>';
       }
     }
 
@@ -1473,6 +1572,7 @@
 
     refreshAgents();
     refreshRuns();
+    refreshAnalytics();
     loadWorkspaceFiles();
     loadRunbooks();
     loadContextPacks();

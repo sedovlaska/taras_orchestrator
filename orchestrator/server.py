@@ -510,6 +510,11 @@ async def runs(limit: int = 50):
     return {"runs": run_history.list_runs(limit)}
 
 
+@app.get("/runs/summary")
+async def runs_summary():
+    return {"summary": run_history.summary()}
+
+
 @app.get("/runs/{run_id}")
 async def run_detail(run_id: str):
     run = run_history.get_run(run_id)
