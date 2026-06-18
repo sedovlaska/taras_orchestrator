@@ -553,9 +553,10 @@ def test_chat_api_requires_approval_before_medium_risk_tools(tmp_path, monkeypat
     monkeypatch.setattr(server, "run_history", store)
     called = {"runner": False}
 
-    def fake_runner(message, route, events, model=None):
+    def fake_runner(message, route, events, model=None, granted_tools=None):
         called["runner"] = True
         called["model"] = model
+        called["granted_tools"] = granted_tools
         events.append({"event": "runner_result", "data": {"runner": "fake", "status": "ok"}})
         return f"answer: {message}"
 
@@ -585,6 +586,8 @@ def test_chat_api_requires_approval_before_medium_risk_tools(tmp_path, monkeypat
     assert called["runner"] is True
     # The resume path threads the stored model into the runner, not the default.
     assert called["model"] == "llama3:8b"
+    # The approved tool id is threaded through so the runtime gate lets it run.
+    assert called["granted_tools"] == ["code.lint_code"]
     assert resumed["answer"] == "answer: please lint this code"
     assert client.get(f"/runs/{payload['run_id']}").json()["run"]["status"] == "completed"
 
@@ -610,6 +613,52 @@ def test_deny_approval_marks_run_denied(tmp_path, monkeypatch):
     assert denied["status"] == "denied"
     assert resume.status_code == 409
     assert run["status"] == "denied"
+
+
+def test_policy_blocks_unapproved_required_approval_tool(monkeypatch):
+    # A medium/high-risk tool requires approval; with no grant in the env the
+    # runtime gate must fail closed even though policy "allows" the risk tier.
+    from orchestrator.policy import APPROVAL_GRANTS_ENV, ToolApprovalRequired, ToolPolicy
+
+    monkeypatch.delenv(APPROVAL_GRANTS_ENV, raising=False)
+    policy = ToolPolicy(
+        allowed_risks={"low", "medium"},
+        approval_required_risks={"medium", "high"},
+    )
+
+    # Low-risk tool needs no approval and runs.
+    policy.require("code.analyze_code")
+    # Medium-risk tool requires approval; not granted -> blocked.
+    with pytest.raises(ToolApprovalRequired):
+        policy.require("code.lint_code")
+    # Once granted via the env channel, the same tool is permitted.
+    monkeypatch.setenv(APPROVAL_GRANTS_ENV, "code.lint_code")
+    policy.require("code.lint_code")
+
+
+def test_gate_tool_blocks_unpredicted_tool_and_emits_trace_marker(monkeypatch, capsys):
+    # Proof the keyword-prediction bypass is closed: a tool that requires
+    # approval is invoked at runtime with NO pre-existing approval. It must NOT
+    # perform its action (returns the blocked message) and must emit a gating
+    # trace marker that the parent records as a `tool_gated` event.
+    from orchestrator.agno_agents import TOOL_GATED_MARKER, gate_tool
+    from orchestrator.policy import APPROVAL_GRANTS_ENV
+    from orchestrator.server import _record_gated_tools
+
+    monkeypatch.delenv(APPROVAL_GRANTS_ENV, raising=False)
+
+    blocked = gate_tool("code.lint_code")
+
+    assert blocked is not None
+    assert "approval required for code.lint_code" in blocked
+    out = capsys.readouterr().out
+    assert TOOL_GATED_MARKER in out
+
+    # The parent process turns the marker into a recorded trace event.
+    events: list[dict] = []
+    _record_gated_tools(out, events)
+    assert [event["event"] for event in events] == ["tool_gated"]
+    assert events[0]["data"]["tool_id"] == "code.lint_code"
 
 
 def test_agno_agents_import_with_model_dependencies():
