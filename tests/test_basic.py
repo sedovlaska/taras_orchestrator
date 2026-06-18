@@ -337,6 +337,50 @@ def test_context_pack_api_crud_and_bundle(tmp_path, monkeypatch):
     assert invalid.status_code == 422
 
 
+def test_diagnostics_report_ok_for_local_runtime(tmp_path, monkeypatch):
+    import orchestrator.diagnostics as diagnostics
+    import orchestrator.workspace as workspace
+    from orchestrator.context_packs import ContextPackStore
+
+    (tmp_path / "README.md").write_text("diagnostics file\n", encoding="utf-8")
+    monkeypatch.setattr(workspace, "PROJECT_ROOT", tmp_path.resolve())
+    monkeypatch.setattr(settings, "workspace_max_file_bytes", 1024)
+    report = diagnostics.build_diagnostics(
+        run_history=RunHistoryStore(tmp_path / "runs.sqlite3"),
+        context_packs=ContextPackStore(tmp_path / "packs.sqlite3"),
+    )
+
+    assert report["status"] == "ok"
+    assert report["counts"]["error"] == 0
+    assert {check["id"] for check in report["checks"]} >= {
+        "settings",
+        "tools",
+        "workspace",
+        "run_history",
+        "context_packs",
+        "model",
+    }
+
+
+def test_diagnostics_api_uses_current_stores(tmp_path, monkeypatch):
+    import orchestrator.server as server
+    import orchestrator.workspace as workspace
+    from orchestrator.context_packs import ContextPackStore
+
+    (tmp_path / "README.md").write_text("diagnostics api\n", encoding="utf-8")
+    monkeypatch.setattr(workspace, "PROJECT_ROOT", tmp_path.resolve())
+    monkeypatch.setattr(server, "run_history", RunHistoryStore(tmp_path / "runs.sqlite3"))
+    monkeypatch.setattr(server, "context_pack_store", ContextPackStore(tmp_path / "packs.sqlite3"))
+    client = TestClient(server.app)
+
+    response = client.get("/diagnostics")
+    payload = response.json()["diagnostics"]
+
+    assert response.status_code == 200
+    assert payload["status"] == "ok"
+    assert payload["counts"]["ok"] >= 5
+
+
 def test_index_exposes_runbook_controls():
     import orchestrator.server as server
 
@@ -347,6 +391,7 @@ def test_index_exposes_runbook_controls():
     assert "loadRunbooks()" in html
     assert 'id="context-file-btn"' in html
     assert 'id="context-pack-save-btn"' in html
+    assert 'id="diagnostics-refresh-btn"' in html
 
 
 def test_run_history_store_persists_runs_and_events(tmp_path):

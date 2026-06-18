@@ -34,6 +34,7 @@ Open `http://localhost:8000`.
 ## API
 
 - `GET /health` returns runtime status, AGNO framework name, model, and member list.
+- `GET /diagnostics` returns local readiness checks for config, storage, workspace, tools, and model settings.
 - `GET /tools` returns the typed tool inventory with current policy decisions.
 - `GET /runs` returns recent chat runs from the local audit log.
 - `GET /runs/summary` returns aggregate run analytics for the browser dashboard.
@@ -90,6 +91,12 @@ individual tools by id, for example `docker.list_images`. Allowed tools with ris
 `TOOL_APPROVAL_REQUIRED_RISKS` are paused until approved through the local approval API or UI.
 All local subprocess execution goes through a central command runner that enforces executable
 allowlists, project-root working directories, environment allowlists, timeouts, and output limits.
+
+## Diagnostics
+
+The `/diagnostics` endpoint performs fast local checks without calling the model: settings sanity,
+tool inventory, readable workspace samples, run-history storage, context-pack storage, and model
+configuration. The browser UI shows the overall status and individual check results.
 
 ## Workspace File Tools
 
