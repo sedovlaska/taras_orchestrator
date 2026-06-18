@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     tool_allowed_risks: str = "low,medium"
     tool_allowed: str = ""
     tool_denied: str = "system.list_processes,docker.list_containers,docker.list_images"
+    run_history_db_path: str = ".data/run_history.sqlite3"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
