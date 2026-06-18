@@ -7,6 +7,10 @@ __pycache__/
 .venv/
 venv/
 
+# Frontend
+node_modules/
+static/dist/
+
 # Local config
 .env
 .data/
