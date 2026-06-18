@@ -21,6 +21,7 @@ from orchestrator.routing import RoutingResult, route_request, should_use_local_
 from orchestrator.runbooks import get_runbook, list_runbooks, render_runbook
 from orchestrator.run_history import RunHistoryStore
 from orchestrator.tool_registry import AGNO_MEMBER_NAMES, get_tool, tool_inventory
+from orchestrator.trace_export import build_run_trace
 from orchestrator.workspace import list_workspace_files, read_workspace_file, search_workspace
 from shared.config import settings
 
@@ -519,6 +520,14 @@ async def runs(limit: int = 50):
 @app.get("/runs/summary")
 async def runs_summary():
     return {"summary": run_history.summary()}
+
+
+@app.get("/runs/{run_id}/trace")
+async def run_trace(run_id: str):
+    trace = build_run_trace(run_history, run_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {"trace": trace}
 
 
 @app.get("/runs/{run_id}")

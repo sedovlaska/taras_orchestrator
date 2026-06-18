@@ -209,6 +209,12 @@
       margin-top: 4px;
     }
 
+    .history-actions {
+      display: flex;
+      gap: 6px;
+      margin-top: 7px;
+    }
+
     .analytics-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -890,8 +896,19 @@
         button.innerHTML = `
           <div class="history-message">${escapeHtml(run.message)}</div>
           <div class="history-meta">${escapeHtml(run.status)} · ${escapeHtml((run.agents || []).join(', ') || run.intent)} · ${escapeHtml(new Date(run.created_at).toLocaleString())}</div>
+          <div class="history-actions">
+            <span class="timeline-action">Open</span>
+            <span class="timeline-action" data-action="trace">Trace</span>
+          </div>
         `;
-        button.addEventListener('click', () => selectRun(run.id));
+        button.addEventListener('click', (event) => {
+          if (event.target?.dataset?.action === 'trace') {
+            event.stopPropagation();
+            exportRunTrace(run.id);
+            return;
+          }
+          selectRun(run.id);
+        });
         historyList.appendChild(button);
       });
     }
@@ -985,6 +1002,27 @@
       (eventsData.events || []).forEach(timelineFromStoredEvent);
       setActiveAgents(run.agents || []);
       clearActiveAgentsSoon();
+    }
+
+    async function exportRunTrace(runId) {
+      try {
+        const resp = await fetch(`/runs/${encodeURIComponent(runId)}/trace`);
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || 'trace export failed');
+        const markdown = data.trace.markdown;
+        container.innerHTML = '';
+        clearTimeline();
+        addMessage(markdown, 'assistant', data.trace.run.agents || []);
+        if (navigator.clipboard) {
+          await navigator.clipboard.writeText(markdown);
+          addMessage('Run trace copied to clipboard.', 'system');
+        } else {
+          addMessage('Run trace rendered below. Clipboard API is unavailable.', 'system');
+        }
+        (data.trace.events || []).forEach(timelineFromStoredEvent);
+      } catch (err) {
+        addMessage(`Trace export error: ${err.message}`, 'error');
+      }
     }
 
     function fileSizeLabel(bytes) {
