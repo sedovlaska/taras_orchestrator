@@ -87,6 +87,59 @@
     .status-summary .count { font-size: 24px; font-weight: 700; color: #4ade80; }
     .status-summary .label { font-size: 11px; color: #666; }
 
+    .timeline {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-height: 120px;
+      max-height: 260px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+
+    .timeline-empty {
+      color: #666;
+      font-size: 12px;
+      line-height: 1.35;
+      padding: 8px 0;
+    }
+
+    .timeline-item {
+      border: 1px solid #292943;
+      background: #101016;
+      border-radius: 8px;
+      padding: 8px 9px;
+    }
+
+    .timeline-item.allow { border-color: #14532d; }
+    .timeline-item.deny { border-color: #7f1d1d; }
+    .timeline-item.error { border-color: #5c2b2b; background: #201313; }
+    .timeline-item.ok { border-color: #1f4b3b; }
+
+    .timeline-kind {
+      color: #8a8a9a;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 3px;
+    }
+
+    .timeline-title {
+      color: #f5f5f5;
+      font-size: 12px;
+      font-weight: 650;
+      line-height: 1.25;
+      word-break: break-word;
+    }
+
+    .timeline-detail {
+      color: #8a8a9a;
+      font-size: 11px;
+      line-height: 1.35;
+      margin-top: 3px;
+      word-break: break-word;
+    }
+
     .refresh-btn {
       background: transparent;
       border: 1px solid #2a2a4a;
@@ -227,6 +280,10 @@
   <div id="sidebar">
     <h2>Agents</h2>
     <div id="agents-list"></div>
+    <h2>Timeline</h2>
+    <div class="timeline" id="timeline">
+      <div class="timeline-empty">Routing, policy, and tool events will appear here.</div>
+    </div>
     <div class="status-summary">
       <div class="count" id="online-count">-</div>
       <div class="label">online</div>
@@ -251,12 +308,31 @@
     const progress = document.getElementById('progress');
     const agentsList = document.getElementById('agents-list');
     const onlineCount = document.getElementById('online-count');
+    const timeline = document.getElementById('timeline');
 
     const AGENT_COLORS = { code: '#3b82f6', db: '#f97316', devops: '#ef4444', docs: '#8b5cf6', system: '#10b981', docker: '#06b6d4' };
     const AGENT_NAMES = ['code', 'db', 'devops', 'docs', 'system', 'docker'];
     let agentStatuses = {};
     let activeAgentNames = new Set();
     let activeSince = 0;
+
+    function clearTimeline() {
+      timeline.innerHTML = '';
+    }
+
+    function addTimelineEvent(kind, title, detail = '', state = '') {
+      const empty = timeline.querySelector('.timeline-empty');
+      if (empty) empty.remove();
+      const div = document.createElement('div');
+      div.className = `timeline-item ${state}`;
+      div.innerHTML = `
+        <div class="timeline-kind">${escapeHtml(kind)}</div>
+        <div class="timeline-title">${escapeHtml(title)}</div>
+        ${detail ? `<div class="timeline-detail">${escapeHtml(detail)}</div>` : ''}
+      `;
+      timeline.appendChild(div);
+      timeline.scrollTop = timeline.scrollHeight;
+    }
 
     function renderAgents() {
       agentsList.innerHTML = '';
@@ -465,6 +541,7 @@
       addMessage(text, 'user');
       input.value = '';
       setLoading(true);
+      clearTimeline();
       addTypingIndicator();
 
       const activeAgents = [];
@@ -495,6 +572,15 @@
             } else if (line.startsWith('data: ')) {
               const data = JSON.parse(line.slice(6));
               switch (eventType) {
+                case 'route': {
+                  addTimelineEvent(
+                    'route',
+                    `Agents: ${data.agents.join(', ')}`,
+                    `${Math.round(data.confidence * 100)}% confidence. ${data.reason}`,
+                    'ok'
+                  );
+                  break;
+                }
                 case 'classify': {
                   removeTypingIndicator();
                   activeAgents.push(...data.agents);
@@ -504,9 +590,39 @@
                   addTypingIndicator();
                   break;
                 }
+                case 'policy_decision': {
+                  addTimelineEvent(
+                    data.allowed ? 'policy allow' : 'policy deny',
+                    data.tool_id,
+                    `${data.reason} (${data.risk} risk)`,
+                    data.allowed ? 'allow' : 'deny'
+                  );
+                  break;
+                }
                 case 'agent_start': {
                   if (!activeAgents.includes(data.agent)) activeAgents.push(data.agent);
                   setActiveAgents(activeAgents);
+                  addTimelineEvent('agent', data.agent, 'selected for this request', 'ok');
+                  break;
+                }
+                case 'runner_start': {
+                  addTimelineEvent('runner', data.runner, 'attempt started');
+                  break;
+                }
+                case 'runner_result': {
+                  addTimelineEvent('runner', data.runner, data.status || 'ok', 'ok');
+                  break;
+                }
+                case 'runner_error': {
+                  addTimelineEvent('runner error', data.runner, data.message || 'failed', 'error');
+                  break;
+                }
+                case 'tool_start': {
+                  addTimelineEvent('tool', data.tool_id, 'started');
+                  break;
+                }
+                case 'tool_result': {
+                  addTimelineEvent('tool', data.tool_id, data.status || 'finished', 'ok');
                   break;
                 }
                 case 'agent_result': {

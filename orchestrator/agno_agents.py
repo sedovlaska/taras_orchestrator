@@ -8,11 +8,12 @@ from agno.models.ollama import Ollama
 from agno.team import Team
 from agno.tools import tool
 
+from orchestrator.policy import current_policy
+from orchestrator.tool_registry import AGNO_MEMBER_NAMES
 from shared.config import settings
 
 LANGUAGE_INSTRUCTION = "Reply in the same language as the user. If the user writes in Russian, reply in Russian."
-
-AGNO_MEMBER_NAMES = ["code", "db", "devops", "docs", "system", "docker"]
+__all__ = ["AGNO_MEMBER_NAMES", "create_orchestrator"]
 
 
 def get_model() -> Ollama:
@@ -23,17 +24,22 @@ def create_code_agent() -> Agent:
     @tool
     def analyze_code(code: str) -> str:
         """Analyze code quality and patterns."""
+        current_policy().require("code.analyze_code")
         return f"Code analysis: {code[:200]}..."
 
     @tool
     def lint_code(path: str = ".") -> str:
         """Run Ruff on a project path."""
-        result = subprocess.run(["ruff", "check", path], capture_output=True, text=True, timeout=30)
+        policy = current_policy()
+        policy.require("code.lint_code")
+        safe_path = str(policy.require_project_path(path))
+        result = subprocess.run(["ruff", "check", safe_path], capture_output=True, text=True, timeout=30)
         return result.stdout or result.stderr or "No issues found."
 
     @tool
     def generate_code(description: str) -> str:
         """Draft code from a short description."""
+        current_policy().require("code.generate_code")
         return f"Generated code for: {description}"
 
     return Agent(
@@ -53,11 +59,13 @@ def create_db_agent() -> Agent:
     @tool
     def run_query(sql: str) -> str:
         """Prepare a SQL query execution summary."""
+        current_policy().require("db.run_query")
         return f"Query execution is not connected yet. Requested SQL: {sql}"
 
     @tool
     def show_schema(db_name: str) -> str:
         """Show database schema placeholder."""
+        current_policy().require("db.show_schema")
         return f"Schema for {db_name}: database connection is not configured yet."
 
     return Agent(
@@ -77,12 +85,16 @@ def create_devops_agent() -> Agent:
     @tool
     def run_tests(path: str = ".") -> str:
         """Run the test suite for a path."""
-        result = subprocess.run(["pytest", path], capture_output=True, text=True, timeout=120)
+        policy = current_policy()
+        policy.require("devops.run_tests")
+        safe_path = str(policy.require_project_path(path))
+        result = subprocess.run(["pytest", safe_path], capture_output=True, text=True, timeout=120)
         return result.stdout or result.stderr or "Tests completed without output."
 
     @tool
     def build_project() -> str:
         """Report project build status."""
+        current_policy().require("devops.build_project")
         return "Build command is not configured yet."
 
     return Agent(
@@ -114,6 +126,7 @@ def create_system_agent() -> Agent:
     @tool
     def get_system_info() -> str:
         """Get CPU and memory usage."""
+        current_policy().require("system.get_system_info")
         cpu = psutil.cpu_percent(interval=1)
         mem = psutil.virtual_memory()
         used_mb = mem.used // (1024**2)
@@ -123,6 +136,7 @@ def create_system_agent() -> Agent:
     @tool
     def list_processes() -> str:
         """List running processes."""
+        current_policy().require("system.list_processes")
         procs = []
         for process in psutil.process_iter(["pid", "name", "cpu_percent"]):
             info = process.info
@@ -132,6 +146,7 @@ def create_system_agent() -> Agent:
     @tool
     def get_disk_usage() -> str:
         """Get disk usage info."""
+        current_policy().require("system.get_disk_usage")
         parts = []
         for part in psutil.disk_partitions():
             try:
@@ -160,12 +175,14 @@ def create_docker_agent() -> Agent:
     @tool
     def list_containers() -> str:
         """List Docker containers."""
+        current_policy().require("docker.list_containers")
         result = subprocess.run(["docker", "ps", "-a"], capture_output=True, text=True, timeout=10)
         return result.stdout or result.stderr or "No containers found."
 
     @tool
     def list_images() -> str:
         """List Docker images."""
+        current_policy().require("docker.list_images")
         result = subprocess.run(["docker", "images"], capture_output=True, text=True, timeout=10)
         return result.stdout or result.stderr or "No images found."
 
