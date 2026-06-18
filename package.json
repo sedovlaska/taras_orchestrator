@@ -9,8 +9,12 @@
     "@mantine/hooks": "^8.3.14",
     "@mantine/notifications": "^8.3.14",
     "@tabler/icons-react": "^3.35.0",
+    "highlight.js": "^11.11.1",
     "react": "^19.2.3",
-    "react-dom": "^19.2.3"
+    "react-dom": "^19.2.3",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@types/react": "^19.2.7",

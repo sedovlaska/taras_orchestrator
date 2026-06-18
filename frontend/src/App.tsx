@@ -34,6 +34,7 @@ import {
   IconCheck,
   IconClipboardText,
   IconCode,
+  IconCopy,
   IconDatabase,
   IconFileSearch,
   IconHistory,
@@ -49,6 +50,12 @@ import {
   IconX
 } from "@tabler/icons-react";
 import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
+import ReactMarkdown from "react-markdown";
+import type { Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeHighlight from "rehype-highlight";
+import "highlight.js/styles/github-dark.css";
 import { api, streamChat } from "./api";
 import type {
   AgentStatus,
@@ -128,6 +135,108 @@ function eventDetail(event: TimelineEvent) {
   if (data.status) return data.status;
   if (data.runner) return data.runner;
   return "";
+}
+
+// Walk the rendered <pre> subtree to recover the raw text for copying, and
+// sniff the language from the inner <code class="language-xxx">.
+function extractCode(node: unknown): { text: string; language: string | null } {
+  let language: string | null = null;
+
+  function text(child: any): string {
+    if (child == null || typeof child === "boolean") return "";
+    if (typeof child === "string" || typeof child === "number") return String(child);
+    if (Array.isArray(child)) return child.map(text).join("");
+    const props = child?.props;
+    if (props) {
+      if (typeof props.className === "string") {
+        const match = /language-(\w+)/.exec(props.className);
+        if (match) language = match[1];
+      }
+      return text(props.children);
+    }
+    return "";
+  }
+
+  const raw = text(node).replace(/\n$/, "");
+  return { text: raw, language };
+}
+
+function CodeBlock({ children }: { children: ReactNode }) {
+  const [copied, setCopied] = useState(false);
+  const { text, language } = extractCode(children);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1400);
+    } catch {
+      // clipboard unavailable; ignore
+    }
+  }
+
+  return (
+    <div className="md-codeblock">
+      {language ? <span className="md-codeblock-lang">{language}</span> : null}
+      <Tooltip label={copied ? "Copied" : "Copy"} withArrow position="left">
+        <ActionIcon
+          size="sm"
+          variant="subtle"
+          color={copied ? "green" : "gray"}
+          onClick={copy}
+          aria-label="Copy code"
+          className="md-copy-btn"
+        >
+          {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+        </ActionIcon>
+      </Tooltip>
+      <pre className="md-pre">{children}</pre>
+    </div>
+  );
+}
+
+const markdownComponents: Components = {
+  pre({ children }) {
+    return <CodeBlock>{children}</CodeBlock>;
+  },
+  code({ className, children, ...rest }) {
+    // Block code keeps the hljs/language class (rehype-highlight target);
+    // inline code (no language class) gets the lightweight pill style.
+    const isBlock = /\bhljs\b|language-/.test(className || "");
+    return (
+      <code className={isBlock ? className : "md-inline-code"} {...rest}>
+        {children}
+      </code>
+    );
+  },
+  a({ children, href }) {
+    return (
+      <a href={href} target="_blank" rel="noreferrer noopener">
+        {children}
+      </a>
+    );
+  },
+  table({ children }) {
+    return (
+      <div className="md-table-wrap">
+        <table>{children}</table>
+      </div>
+    );
+  }
+};
+
+function MarkdownMessage({ content }: { content: string }) {
+  return (
+    <div className="markdown-body">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[[rehypeHighlight, { ignoreMissing: true, detect: true }]]}
+        components={markdownComponents}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
 }
 
 function AgentBadge({ name, online = true }: { name: string; online?: boolean }) {
@@ -616,9 +725,19 @@ export function App() {
                       ))}
                     </Group>
                   ) : null}
-                  <Text size="sm" component="pre" className="message-text">
-                    {message.content || (loadingChat && message.role === "assistant" ? "Thinking..." : "")}
-                  </Text>
+                  {message.role === "assistant" ? (
+                    message.content ? (
+                      <MarkdownMessage content={message.content} />
+                    ) : (
+                      <Text size="sm" c="dimmed" className="message-text">
+                        {loadingChat ? "Thinking..." : ""}
+                      </Text>
+                    )
+                  ) : (
+                    <Text size="sm" component="pre" className="message-text">
+                      {message.content}
+                    </Text>
+                  )}
                 </Paper>
               ))}
             </Stack>
