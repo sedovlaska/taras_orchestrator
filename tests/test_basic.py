@@ -349,6 +349,11 @@ def test_diagnostics_report_ok_for_local_runtime(tmp_path, monkeypatch):
     report = diagnostics.build_diagnostics(
         run_history=RunHistoryStore(tmp_path / "runs.sqlite3"),
         context_packs=ContextPackStore(tmp_path / "packs.sqlite3"),
+        model_lister=lambda: {
+            "models": [settings.llm_model],
+            "default_model": settings.llm_model,
+            "reachable": True,
+        },
     )
 
     assert report["status"] == "ok"
@@ -360,10 +365,71 @@ def test_diagnostics_report_ok_for_local_runtime(tmp_path, monkeypatch):
         "run_history",
         "context_packs",
         "model",
+        "ollama_runtime",
     }
 
 
+def test_diagnostics_ollama_unreachable_is_error(tmp_path, monkeypatch):
+    import orchestrator.diagnostics as diagnostics
+    from orchestrator.context_packs import ContextPackStore
+
+    report = diagnostics.build_diagnostics(
+        run_history=RunHistoryStore(tmp_path / "runs.sqlite3"),
+        context_packs=ContextPackStore(tmp_path / "packs.sqlite3"),
+        model_lister=lambda: {
+            "models": [],
+            "default_model": settings.llm_model,
+            "reachable": False,
+        },
+    )
+
+    check = next(c for c in report["checks"] if c["id"] == "ollama_runtime")
+    assert check["status"] == "error"
+    assert "unreachable" in check["detail"].lower()
+    assert report["status"] == "error"
+
+
+def test_diagnostics_ollama_model_missing_is_warn(tmp_path, monkeypatch):
+    import orchestrator.diagnostics as diagnostics
+    from orchestrator.context_packs import ContextPackStore
+
+    monkeypatch.setattr(settings, "llm_model", "needed-model")
+    report = diagnostics.build_diagnostics(
+        run_history=RunHistoryStore(tmp_path / "runs.sqlite3"),
+        context_packs=ContextPackStore(tmp_path / "packs.sqlite3"),
+        model_lister=lambda: {
+            "models": ["some-other-model"],
+            "default_model": "needed-model",
+            "reachable": True,
+        },
+    )
+
+    check = next(c for c in report["checks"] if c["id"] == "ollama_runtime")
+    assert check["status"] == "warn"
+    assert "ollama pull needed-model" in check["detail"]
+
+
+def test_diagnostics_ollama_model_present_is_ok(tmp_path, monkeypatch):
+    import orchestrator.diagnostics as diagnostics
+    from orchestrator.context_packs import ContextPackStore
+
+    monkeypatch.setattr(settings, "llm_model", "needed-model")
+    report = diagnostics.build_diagnostics(
+        run_history=RunHistoryStore(tmp_path / "runs.sqlite3"),
+        context_packs=ContextPackStore(tmp_path / "packs.sqlite3"),
+        model_lister=lambda: {
+            "models": ["needed-model"],
+            "default_model": "needed-model",
+            "reachable": True,
+        },
+    )
+
+    check = next(c for c in report["checks"] if c["id"] == "ollama_runtime")
+    assert check["status"] == "ok"
+
+
 def test_diagnostics_api_uses_current_stores(tmp_path, monkeypatch):
+    import orchestrator.diagnostics as diagnostics
     import orchestrator.server as server
     import orchestrator.workspace as workspace
     from orchestrator.context_packs import ContextPackStore
@@ -372,6 +438,15 @@ def test_diagnostics_api_uses_current_stores(tmp_path, monkeypatch):
     monkeypatch.setattr(workspace, "PROJECT_ROOT", tmp_path.resolve())
     monkeypatch.setattr(server, "run_history", RunHistoryStore(tmp_path / "runs.sqlite3"))
     monkeypatch.setattr(server, "context_pack_store", ContextPackStore(tmp_path / "packs.sqlite3"))
+    monkeypatch.setattr(
+        diagnostics,
+        "list_ollama_models",
+        lambda: {
+            "models": [settings.llm_model],
+            "default_model": settings.llm_model,
+            "reachable": True,
+        },
+    )
     client = TestClient(server.app)
 
     response = client.get("/diagnostics")

@@ -19,6 +19,7 @@ from orchestrator.conversations import ConversationStore
 from orchestrator.diagnostics import build_diagnostics
 from orchestrator.evals import list_eval_cases, run_eval_suite
 from orchestrator.agno_agents import TOOL_GATED_MARKER
+from orchestrator.ollama import list_ollama_models
 from orchestrator.policy import APPROVAL_GRANTS_ENV, current_policy
 from orchestrator.routing import RoutingResult, route_request, should_use_local_system_status
 from orchestrator.runbooks import get_runbook, list_runbooks, render_runbook
@@ -444,24 +445,6 @@ def run_orchestrator(
             print(f"{label.upper().replace(' ', '_')}_FALLBACK error={str(exc)!r}", flush=True)
 
     return _friendly_model_error("; ".join(errors))
-
-def list_ollama_models() -> dict:
-    """List locally available Ollama models via /api/tags.
-
-    Degrades gracefully: if Ollama is unreachable, returns an empty model list
-    with reachable=False plus the configured default model.
-    """
-    url = f"{settings.ollama_host.rstrip('/')}/api/tags"
-    request = urllib.request.Request(url, method="GET")
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    try:
-        with opener.open(request, timeout=5) as response:
-            body = json.loads(response.read().decode("utf-8"))
-        models = [model["name"] for model in body.get("models", []) if model.get("name")]
-        return {"models": models, "default_model": settings.llm_model, "reachable": True}
-    except Exception as exc:
-        print(f"OLLAMA_TAGS_FAILED error={str(exc)!r}", flush=True)
-        return {"models": [], "default_model": settings.llm_model, "reachable": False}
 
 
 @app.get("/models")
