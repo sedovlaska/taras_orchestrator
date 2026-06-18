@@ -18,7 +18,8 @@ class Settings(BaseSettings):
     command_env_allowlist: str = (
         "PATH,Path,PATHEXT,SYSTEMROOT,SystemRoot,WINDIR,COMSPEC,ComSpec,"
         "TEMP,TMP,HOME,USERPROFILE,LOCALAPPDATA,APPDATA,"
-        "PYTHONPATH,OLLAMA_HOST,NO_PROXY,no_proxy,PYTHONIOENCODING"
+        "PYTHONPATH,OLLAMA_HOST,NO_PROXY,no_proxy,PYTHONIOENCODING,"
+        "ORCHESTRATOR_APPROVED_TOOLS"
     )
     workspace_file_list_limit: int = 500
     workspace_max_file_bytes: int = 1_048_576

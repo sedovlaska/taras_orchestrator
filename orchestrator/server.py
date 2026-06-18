@@ -18,7 +18,8 @@ from orchestrator.context_packs import ContextPackStore
 from orchestrator.conversations import ConversationStore
 from orchestrator.diagnostics import build_diagnostics
 from orchestrator.evals import list_eval_cases, run_eval_suite
-from orchestrator.policy import current_policy
+from orchestrator.agno_agents import TOOL_GATED_MARKER
+from orchestrator.policy import APPROVAL_GRANTS_ENV, current_policy
 from orchestrator.routing import RoutingResult, route_request, should_use_local_system_status
 from orchestrator.runbooks import get_runbook, list_runbooks, render_runbook
 from orchestrator.run_history import RunHistoryStore
@@ -245,7 +246,33 @@ def _ollama_env_overrides() -> dict[str, str]:
     }
 
 
-def ask_agno_team(message: str, agents: list[str], model: str | None = None) -> str:
+def _record_gated_tools(stdout: str, events: list[RunEvent] | None) -> None:
+    """Turn TOOL_GATED markers printed by the subprocess into trace events.
+
+    The fail-closed gate runs inside the AGNO subprocess, which cannot reach the
+    run-history store. It prints one marker line per blocked tool; here we parse
+    them so each gated tool is recorded as a `tool_gated` trace event.
+    """
+    if events is None or TOOL_GATED_MARKER not in stdout:
+        return
+    for line in stdout.splitlines():
+        idx = line.find(TOOL_GATED_MARKER)
+        if idx == -1:
+            continue
+        try:
+            payload = json.loads(line[idx + len(TOOL_GATED_MARKER):])
+        except json.JSONDecodeError:
+            continue
+        events.append({"event": "tool_gated", "data": payload})
+
+
+def ask_agno_team(
+    message: str,
+    agents: list[str],
+    model: str | None = None,
+    granted_tools: list[str] | None = None,
+    events: list[RunEvent] | None = None,
+) -> str:
     print(f"AGNO_TEAM_START agents={agents!r} model={model!r} message={message!r}", flush=True)
     code = r'''
 import asyncio
@@ -261,12 +288,16 @@ if target_agents and target_agents != ["orchestrator"]:
 resp = create_orchestrator(model).run(message)
 print("__AGNO_JSON__" + json.dumps({"content": str(resp.content)}, ensure_ascii=False), flush=True)
 '''
+    env_overrides = _ollama_env_overrides()
+    if granted_tools:
+        env_overrides[APPROVAL_GRANTS_ENV] = ",".join(granted_tools)
     result = run_command(
         [sys.executable, "-c", code, message, json.dumps(agents, ensure_ascii=False), model or ""],
         cwd=PROJECT_ROOT,
         timeout_seconds=180,
-        env_overrides=_ollama_env_overrides(),
+        env_overrides=env_overrides,
     )
+    _record_gated_tools(result.stdout, events)
     marker = "__AGNO_JSON__"
     marker_pos = result.stdout.rfind(marker)
     if result.ok and marker_pos != -1:
@@ -371,11 +402,12 @@ def run_orchestrator(
     route: RoutingResult | list[str],
     events: list[RunEvent] | None = None,
     model: str | None = None,
+    granted_tools: list[str] | None = None,
 ) -> str:
     errors = []
     agents = route.agents if isinstance(route, RoutingResult) else route
     for label, runner in (
-        ("AGNO Team", lambda: ask_agno_team(message, agents, model)),
+        ("AGNO Team", lambda: ask_agno_team(message, agents, model, granted_tools, events)),
         (
             "Local system",
             lambda: system_status(events)
@@ -681,8 +713,14 @@ async def resume_run(run_id: str):
 
     resume_event = {"event": "resume", "data": {"run_id": run_id}}
     run_history.append_event(run_id, "resume", resume_event["data"])
+    granted_tools = [
+        approval["tool_id"]
+        for approval in run_history.list_approvals(run_id=run_id, status="approved")
+    ]
     events: list[RunEvent] = []
-    answer = run_orchestrator(run["message"], run["agents"], events, model=run["model"])
+    answer = run_orchestrator(
+        run["message"], run["agents"], events, model=run["model"], granted_tools=granted_tools
+    )
     record_events(run_id, events)
     done_data = {
         "answer": answer,
