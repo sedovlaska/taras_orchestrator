@@ -112,7 +112,8 @@ export async function streamChat(
     onDone: (payload: { answer?: string; agents_used?: string[] }) => void;
   },
   conversationId?: string | null,
-  model?: string | null
+  model?: string | null,
+  signal?: AbortSignal
 ) {
   const response = await fetch("/chat/stream", {
     method: "POST",
@@ -121,7 +122,8 @@ export async function streamChat(
       message,
       conversation_id: conversationId || null,
       ...(model ? { model } : {})
-    })
+    }),
+    signal
   });
 
   if (!response.ok || !response.body) {

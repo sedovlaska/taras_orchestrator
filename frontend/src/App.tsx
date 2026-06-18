@@ -6,6 +6,7 @@ import {
   Button,
   Card,
   Code,
+  Collapse,
   Divider,
   Group,
   Indicator,
@@ -24,36 +25,44 @@ import {
   ThemeIcon,
   Title,
   Tooltip,
+  UnstyledButton,
   rem
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import {
   IconActivity,
+  IconAlertTriangle,
   IconBook2,
   IconBrandDocker,
   IconChartBar,
   IconCheck,
+  IconChevronDown,
   IconClipboardText,
   IconCode,
   IconCopy,
   IconCpu,
   IconDatabase,
   IconFileSearch,
+  IconGitBranch,
   IconHistory,
   IconMessage,
   IconMessagePlus,
   IconPlayerPlay,
+  IconPlayerStopFilled,
   IconRefresh,
   IconRobot,
+  IconRoute,
   IconSearch,
   IconSend,
   IconSettings,
   IconShieldCheck,
+  IconShieldLock,
   IconTerminal2,
+  IconTool,
   IconTrash,
   IconX
 } from "@tabler/icons-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
@@ -162,6 +171,205 @@ function eventDetail(event: TimelineEvent) {
   if (data.status) return data.status;
   if (data.runner) return data.runner;
   return "";
+}
+
+// Icon per SSE event family for the live runner timeline. Keeps each step
+// glanceable without leaning on color alone.
+function eventIcon(event: TimelineEvent) {
+  const name = event.event;
+  if (name === "route" || name === "classify") return IconRoute;
+  if (name === "policy_decision") return IconShieldLock;
+  if (name === "agent_start") return IconGitBranch;
+  if (name === "approval_required" || name === "approval_resolved") return IconShieldCheck;
+  if (name === "tool_start" || name === "tool_result") return IconTool;
+  if (name === "runner_start") return IconCpu;
+  if (name === "runner_result") return IconCheck;
+  if (name === "runner_error" || name.includes("error")) return IconAlertTriangle;
+  if (name === "done") return IconCheck;
+  return IconActivity;
+}
+
+// One-line label for a timeline step — short enough to scan in a vertical rail.
+function eventLabel(event: TimelineEvent) {
+  const data = event.data || {};
+  switch (event.event) {
+    case "route":
+      return `Routed to ${(data.agents || []).join(", ") || "orchestrator"}`;
+    case "classify":
+      return `Classified as ${data.intent || "request"}`;
+    case "policy_decision":
+      return `${data.allowed ? "Allowed" : "Denied"} ${data.tool_id || "tool"}`;
+    case "agent_start":
+      return `${data.agent || "Agent"} engaged`;
+    case "approval_required":
+      return `${data.tool_id || "Tool"} needs approval`;
+    case "approval_resolved":
+      return `${data.tool_id || "Tool"} ${data.status || "resolved"}`;
+    case "tool_start":
+      return `Calling ${data.tool_id || "tool"}`;
+    case "tool_result":
+      return `${data.tool_id || "Tool"} returned`;
+    case "runner_start":
+      return `${data.runner || "Runner"} trying`;
+    case "runner_result":
+      return `${data.runner || "Runner"} answered`;
+    case "runner_error":
+      return `${data.runner || "Runner"} fell back`;
+    case "done":
+      return "Response ready";
+    default:
+      return event.event.replaceAll("_", " ");
+  }
+}
+
+// A live, chronological rail of orchestrator steps rendered beside the
+// in-progress assistant message. While streaming it stays expanded with a
+// pulsing head; once `done` arrives it settles into a single collapsed summary
+// line that can be re-opened to audit the run.
+function RunnerTimeline({
+  events,
+  running,
+  onResolveApproval
+}: {
+  events: TimelineEvent[];
+  running: boolean;
+  onResolveApproval: (event: TimelineEvent, action: "approve" | "deny") => void;
+}) {
+  const [open, setOpen] = useState(true);
+  const settled = !running;
+
+  // Auto-collapse when the run settles; re-expand on a fresh run.
+  useEffect(() => {
+    setOpen(running);
+  }, [running]);
+
+  if (events.length === 0) return null;
+
+  const failed = events.some((event) => event.event.includes("error"));
+  const needsApproval = events.some((event) => event.event === "approval_required");
+  // Reuse the app's existing semantic hues: green = success, red = error,
+  // orange = needs-attention. Blue marks work in progress.
+  const summaryColor = failed ? "orange" : needsApproval ? "orange" : running ? "blue" : "green";
+  const settledText = failed
+    ? "Completed with fallbacks"
+    : needsApproval
+      ? "Waiting on approval"
+      : "Completed";
+  const stepCount = `${events.length} ${events.length === 1 ? "step" : "steps"}`;
+
+  return (
+    <Paper withBorder radius="sm" className={`runner-timeline ${settled ? "is-settled" : "is-running"}`}>
+      <UnstyledButton
+        className="runner-timeline-head"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        aria-label={running ? "Orchestrator working — toggle step detail" : `Run trace, ${stepCount} — toggle detail`}
+      >
+        <Group gap="xs" wrap="nowrap" justify="space-between">
+          <Group gap="xs" wrap="nowrap" style={{ minWidth: 0 }}>
+            {running ? (
+              <Loader size={14} color={summaryColor} />
+            ) : (
+              <ThemeIcon size="sm" radius="xl" variant="light" color={summaryColor}>
+                {failed ? <IconAlertTriangle size={13} /> : <IconCheck size={13} />}
+              </ThemeIcon>
+            )}
+            {/* While running, lead with a live status word; once settled, drop
+                the eyebrow and read as one quiet sentence-case line. */}
+            {running ? (
+              <Text size="xs" fw={700} tt="uppercase" c={summaryColor} style={{ letterSpacing: "0.03em" }}>
+                Working
+              </Text>
+            ) : (
+              <Text size="sm" fw={600} c={failed || needsApproval ? summaryColor : undefined}>
+                {settledText}
+              </Text>
+            )}
+            <Text size={running ? "xs" : "sm"} c="dimmed" lineClamp={1}>
+              {running ? eventLabel(events[events.length - 1]) : `· ${stepCount}`}
+            </Text>
+          </Group>
+          <IconChevronDown
+            size={15}
+            className="runner-timeline-chevron"
+            style={{ transform: open ? "rotate(180deg)" : "none" }}
+          />
+        </Group>
+      </UnstyledButton>
+
+      <Collapse in={open}>
+        <Stack gap={0} className="runner-timeline-rail" p="xs" pt={4}>
+          {events.map((event, index) => {
+            const Icon = eventIcon(event);
+            const tone = eventTone(event);
+            const detail = eventDetail(event);
+            const isLast = index === events.length - 1;
+            const pending = running && isLast;
+            return (
+              <Group
+                key={`${event.event}-${index}`}
+                gap="xs"
+                wrap="nowrap"
+                align="flex-start"
+                className={`runner-step ${pending ? "is-pending" : ""}`}
+              >
+                <Box className="runner-step-marker">
+                  <ThemeIcon
+                    size={22}
+                    radius="xl"
+                    variant={pending ? "filled" : "light"}
+                    color={tone}
+                    className={pending ? "runner-step-pulse" : undefined}
+                  >
+                    <Icon size={13} />
+                  </ThemeIcon>
+                  {!isLast ? <span className="runner-step-line" /> : null}
+                </Box>
+                <Box style={{ flex: 1, minWidth: 0, paddingBottom: isLast ? 0 : 10 }}>
+                  <Group gap={6} wrap="nowrap" justify="space-between">
+                    <Text size="sm" fw={600} lineClamp={1}>
+                      {eventLabel(event)}
+                    </Text>
+                    {event.event === "approval_required" ? (
+                      <Group gap={4} wrap="nowrap">
+                        <Tooltip label="Approve" withArrow>
+                          <ActionIcon
+                            size="sm"
+                            color="green"
+                            variant="light"
+                            onClick={() => onResolveApproval(event, "approve")}
+                            aria-label="Approve tool call"
+                          >
+                            <IconCheck size={14} />
+                          </ActionIcon>
+                        </Tooltip>
+                        <Tooltip label="Deny" withArrow>
+                          <ActionIcon
+                            size="sm"
+                            color="red"
+                            variant="light"
+                            onClick={() => onResolveApproval(event, "deny")}
+                            aria-label="Deny tool call"
+                          >
+                            <IconX size={14} />
+                          </ActionIcon>
+                        </Tooltip>
+                      </Group>
+                    ) : null}
+                  </Group>
+                  {detail ? (
+                    <Text size="xs" c="dimmed" lineClamp={2}>
+                      {detail}
+                    </Text>
+                  ) : null}
+                </Box>
+              </Group>
+            );
+          })}
+        </Stack>
+      </Collapse>
+    </Paper>
+  );
 }
 
 // Walk the rendered <pre> subtree to recover the raw text for copying, and
@@ -392,6 +600,8 @@ export function App() {
   const [runbooks, setRunbooks] = useState<Runbook[]>([]);
   const [selectedRunbookId, setSelectedRunbookId] = useState<string | null>(null);
   const [runbookValues, setRunbookValues] = useState<Record<string, string>>({});
+  const abortRef = useRef<AbortController | null>(null);
+  const canceledRef = useRef(false);
 
   const onlineCount = agents.filter((agent) => agent.online).length;
   const selectedRunbook = runbooks.find((runbook) => runbook.id === selectedRunbookId) || null;
@@ -653,9 +863,19 @@ export function App() {
     }
   }
 
+  function stopChat() {
+    if (!abortRef.current) return;
+    canceledRef.current = true;
+    abortRef.current.abort();
+  }
+
   async function sendMessage(override?: string) {
     const text = (override ?? input).trim();
     if (!text || loadingChat) return;
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+    canceledRef.current = false;
 
     setLoadingChat(true);
     setInput("");
@@ -704,17 +924,37 @@ export function App() {
             )
           );
         }
-      }, conversationId, selectedModel);
+      }, conversationId, selectedModel, controller.signal);
       refreshAll();
     } catch (error) {
-      setMessages((items) =>
-        items.map((item) =>
-          item.id === assistantId
-            ? { ...item, role: "error", content: error instanceof Error ? error.message : String(error) }
-            : item
-        )
-      );
+      // A user-initiated cancel is not a failure: settle the placeholder
+      // quietly (keeping any partial answer) instead of flashing an error.
+      const aborted =
+        canceledRef.current || (error instanceof DOMException && error.name === "AbortError");
+      if (aborted) {
+        setMessages((items) =>
+          items.map((item) =>
+            item.id === assistantId
+              ? {
+                  ...item,
+                  role: "assistant",
+                  content: answer || "_Stopped._"
+                }
+              : item
+          )
+        );
+      } else {
+        setMessages((items) =>
+          items.map((item) =>
+            item.id === assistantId
+              ? { ...item, role: "error", content: error instanceof Error ? error.message : String(error) }
+              : item
+          )
+        );
+      }
     } finally {
+      abortRef.current = null;
+      canceledRef.current = false;
       setLoadingChat(false);
       window.setTimeout(() => setActiveAgents([]), 1200);
     }
@@ -995,36 +1235,52 @@ export function App() {
         <Stack h="calc(100vh - 90px)" gap="md">
           <ScrollArea className="chat-scroll" offsetScrollbars>
             <Stack gap="sm" p="xs">
-              {messages.map((message) => (
-                <Paper
-                  key={message.id}
-                  withBorder={message.role !== "user"}
-                  radius="sm"
-                  p="md"
-                  className={`message message-${message.role}`}
-                >
-                  {message.agents?.length ? (
-                    <Group gap={4} mb={6}>
-                      {message.agents.map((agent) => (
-                        <AgentBadge key={agent} name={agent} />
-                      ))}
-                    </Group>
-                  ) : null}
-                  {message.role === "assistant" ? (
-                    message.content ? (
-                      <MarkdownMessage content={message.content} />
-                    ) : (
-                      <Text size="sm" c="dimmed" className="message-text">
-                        {loadingChat ? "Thinking..." : ""}
-                      </Text>
-                    )
-                  ) : (
-                    <Text size="sm" component="pre" className="message-text">
-                      {message.content}
-                    </Text>
-                  )}
-                </Paper>
-              ))}
+              {messages.map((message, index) => {
+                // The runner timeline belongs to the assistant turn it produced:
+                // pin it above the last assistant bubble while it streams, and
+                // leave it there (settled/collapsed) once the run completes.
+                const isLastAssistant =
+                  message.role === "assistant" && index === messages.length - 1;
+                const showTimeline = isLastAssistant && timeline.length > 0;
+                return (
+                  <Box key={message.id} className="message-row">
+                    {showTimeline ? (
+                      <RunnerTimeline
+                        events={timeline}
+                        running={loadingChat}
+                        onResolveApproval={resolveApproval}
+                      />
+                    ) : null}
+                    <Paper
+                      withBorder={message.role !== "user"}
+                      radius="sm"
+                      p="md"
+                      className={`message message-${message.role}`}
+                    >
+                      {message.agents?.length ? (
+                        <Group gap={4} mb={6}>
+                          {message.agents.map((agent) => (
+                            <AgentBadge key={agent} name={agent} />
+                          ))}
+                        </Group>
+                      ) : null}
+                      {message.role === "assistant" ? (
+                        message.content ? (
+                          <MarkdownMessage content={message.content} />
+                        ) : (
+                          <Text size="sm" c="dimmed" className="message-text">
+                            {loadingChat ? "Thinking..." : ""}
+                          </Text>
+                        )
+                      ) : (
+                        <Text size="sm" component="pre" className="message-text">
+                          {message.content}
+                        </Text>
+                      )}
+                    </Paper>
+                  </Box>
+                );
+              })}
             </Stack>
           </ScrollArea>
 
@@ -1046,15 +1302,31 @@ export function App() {
                 }}
                 className="composer-input"
               />
-              <Button
-                h={54}
-                disabled={loadingChat || !input.trim()}
-                loading={loadingChat}
-                rightSection={<IconSend size={16} />}
-                onClick={() => sendMessage()}
-              >
-                Send
-              </Button>
+              {loadingChat ? (
+                <Tooltip label="Stop generating" withArrow>
+                  <Button
+                    h={54}
+                    miw={96}
+                    color="gray"
+                    variant="default"
+                    leftSection={<IconPlayerStopFilled size={16} />}
+                    onClick={stopChat}
+                    aria-label="Stop generating the response"
+                  >
+                    Stop
+                  </Button>
+                </Tooltip>
+              ) : (
+                <Button
+                  h={54}
+                  miw={96}
+                  disabled={!input.trim()}
+                  rightSection={<IconSend size={16} />}
+                  onClick={() => sendMessage()}
+                >
+                  Send
+                </Button>
+              )}
             </Group>
           </Paper>
         </Stack>
