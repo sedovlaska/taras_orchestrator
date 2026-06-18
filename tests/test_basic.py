@@ -79,6 +79,13 @@ def test_server_route_agents_keeps_legacy_list_contract():
     assert route_agents("please lint this code") == ["code"]
 
 
+def test_agno_agents_import_with_model_dependencies():
+    from orchestrator.agno_agents import AGNO_MEMBER_NAMES, create_orchestrator
+
+    assert "code" in AGNO_MEMBER_NAMES
+    assert callable(create_orchestrator)
+
+
 async def test_event_queue():
     queue = EventQueue()
     await queue.emit(StreamEvent(event="test", data={"key": "value"}))
