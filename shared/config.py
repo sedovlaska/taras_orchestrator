@@ -5,6 +5,13 @@ class Settings(BaseSettings):
     llm_model: str = "qwen3:1.7b"
     ollama_host: str = "http://localhost:11434"
 
+    # LLM provider backend: "ollama" (local) or "openai" (OpenAI-compatible,
+    # e.g. OpenRouter / OpenAI / LM Studio). When "openai", LLM_MODEL is the
+    # provider model id (e.g. "openai/gpt-4o-mini" on OpenRouter).
+    llm_provider: str = "ollama"
+    openai_base_url: str = ""
+    openai_api_key: str = ""
+
     orchestrator_port: int = 8000
     tool_policy_mode: str = "safe"
     tool_allowed_risks: str = "low,medium"
@@ -19,7 +26,8 @@ class Settings(BaseSettings):
         "PATH,Path,PATHEXT,SYSTEMROOT,SystemRoot,WINDIR,COMSPEC,ComSpec,"
         "TEMP,TMP,HOME,USERPROFILE,LOCALAPPDATA,APPDATA,"
         "PYTHONPATH,OLLAMA_HOST,NO_PROXY,no_proxy,PYTHONIOENCODING,"
-        "ORCHESTRATOR_APPROVED_TOOLS"
+        "ORCHESTRATOR_APPROVED_TOOLS,"
+        "LLM_PROVIDER,LLM_MODEL,OPENAI_BASE_URL,OPENAI_API_KEY"
     )
     workspace_file_list_limit: int = 500
     workspace_max_file_bytes: int = 1_048_576

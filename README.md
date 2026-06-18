@@ -31,6 +31,30 @@ python -m orchestrator.server
 
 Open `http://localhost:8000`.
 
+## Model Provider
+
+The model backend is selectable with `LLM_PROVIDER`:
+
+- `ollama` (default) — local Ollama at `OLLAMA_HOST`, using `LLM_MODEL`.
+- `openai` — any OpenAI-compatible endpoint (OpenRouter, OpenAI, LM Studio). No
+  local Ollama is required; the Ollama-specific fallback runners are skipped and
+  the AGNO Team path drives the OpenAI-compatible model.
+
+To run against OpenRouter without Ollama, set in `.env`:
+
+```bash
+LLM_PROVIDER=openai
+LLM_MODEL=openai/gpt-4o-mini
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+OPENAI_API_KEY=sk-or-...
+```
+
+`GET /health` reports the active `provider`, `GET /models` returns the configured
+model (without calling Ollama), and `/diagnostics` skips the Ollama reachability
+check while verifying the base URL and API key are set. The same `OPENAI_*` and
+`LLM_PROVIDER` settings are passed through to the AGNO Team subprocess via the
+command environment allowlist (the API key is never logged).
+
 ## API
 
 - `GET /health` returns runtime status, AGNO framework name, model, and member list.

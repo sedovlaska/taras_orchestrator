@@ -4,7 +4,9 @@ import json
 
 import psutil
 from agno.agent import Agent
+from agno.models.base import Model
 from agno.models.ollama import Ollama
+from agno.models.openai import OpenAILike
 from agno.team import Team
 from agno.tools import tool
 
@@ -46,8 +48,22 @@ def gate_tool(tool_id: str) -> str | None:
     return None
 
 
-def get_model(model_id: str | None = None) -> Ollama:
-    return Ollama(id=model_id or settings.llm_model, host=settings.ollama_host)
+def get_model(model_id: str | None = None) -> Model:
+    """Build the AGNO model for the configured provider.
+
+    With ``LLM_PROVIDER=openai`` this returns an OpenAI-compatible model
+    (OpenRouter / OpenAI / LM Studio) configured with ``OPENAI_BASE_URL`` and
+    ``OPENAI_API_KEY``. Otherwise it returns the local Ollama model. The
+    per-request ``model_id`` override applies to both paths.
+    """
+    resolved_id = model_id or settings.llm_model
+    if settings.llm_provider == "openai":
+        return OpenAILike(
+            id=resolved_id,
+            base_url=settings.openai_base_url or None,
+            api_key=settings.openai_api_key or None,
+        )
+    return Ollama(id=resolved_id, host=settings.ollama_host)
 
 
 def create_code_agent(model_id: str | None = None) -> Agent:
