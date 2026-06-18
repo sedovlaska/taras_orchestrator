@@ -10,12 +10,13 @@ import urllib.request
 from pathlib import Path
 
 import psutil
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from orchestrator.policy import current_policy
 from orchestrator.routing import RoutingResult, route_request, should_use_local_system_status
+from orchestrator.run_history import RunHistoryStore
 from orchestrator.tool_registry import AGNO_MEMBER_NAMES, get_tool, tool_inventory
 from shared.config import settings
 
@@ -25,6 +26,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 PROJECT_ROOT = Path(__file__).parent.parent
 
 RunEvent = dict[str, object]
+run_history = RunHistoryStore.from_settings()
 
 class ChatRequest(BaseModel):
     message: str
@@ -35,9 +37,33 @@ class ChatResponse(BaseModel):
     agents_used: list[str]
     route: dict
     events: list[dict]
+    run_id: str
 
 def route_agents(message: str) -> list[str]:
     return route_request(message).agents
+
+
+def initial_run_events(route: RoutingResult) -> list[RunEvent]:
+    events: list[RunEvent] = [
+        {"event": "route", "data": route.as_dict()},
+        {
+            "event": "classify",
+            "data": {
+                "intent": route.intent,
+                "agents": route.agents,
+                "confidence": route.confidence,
+                "reason": route.reason,
+            },
+        },
+    ]
+    events.extend({"event": "policy_decision", "data": decision} for decision in route.policy_decisions)
+    events.extend({"event": "agent_start", "data": {"agent": agent}} for agent in route.agents)
+    return events
+
+
+def record_events(run_id: str, events: list[RunEvent]) -> None:
+    for event in events:
+        run_history.append_event(run_id, str(event["event"]), dict(event["data"]))
 
 def system_status(events: list[RunEvent] | None = None) -> str:
     policy = current_policy()
@@ -283,6 +309,26 @@ async def tools():
     return {"tools": inventory}
 
 
+@app.get("/runs")
+async def runs(limit: int = 50):
+    return {"runs": run_history.list_runs(limit)}
+
+
+@app.get("/runs/{run_id}")
+async def run_detail(run_id: str):
+    run = run_history.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {"run": run}
+
+
+@app.get("/runs/{run_id}/events")
+async def run_events(run_id: str):
+    if run_history.get_run(run_id) is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {"events": run_history.list_events(run_id)}
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     html_file = STATIC_DIR / "index.html"
@@ -292,13 +338,21 @@ async def index():
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     route = route_request(request.message)
+    run = run_history.create_run(request.message, route.as_dict())
+    initial_events = initial_run_events(route)
+    record_events(run["id"], initial_events)
     events: list[RunEvent] = []
     answer = run_orchestrator(request.message, route, events)
+    record_events(run["id"], events)
+    done_data = {"answer": answer, "intent": route.intent, "agents": route.agents, "route": route.as_dict()}
+    run_history.append_event(run["id"], "done", done_data)
+    run_history.complete_run(run["id"], answer)
     return ChatResponse(
         answer=answer,
         agents_used=route.agents,
         route=route.as_dict(),
-        events=events,
+        events=initial_events + events + [{"event": "done", "data": done_data}],
+        run_id=run["id"],
     )
 
 
@@ -310,33 +364,32 @@ def _sse(event: str, data: dict) -> str:
 async def chat_stream(request: ChatRequest):
     async def event_generator():
         route = route_request(request.message)
-        yield _sse("route", route.as_dict())
-        yield _sse(
-            "classify",
-            {
-                "intent": route.intent,
-                "agents": route.agents,
-                "confidence": route.confidence,
-                "reason": route.reason,
-            },
-        )
-        for decision in route.policy_decisions:
-            yield _sse("policy_decision", decision)
-        for agent in route.agents:
-            yield _sse("agent_start", {"agent": agent})
+        run = run_history.create_run(request.message, route.as_dict())
+        initial_events = initial_run_events(route)
+        for event in initial_events:
+            run_history.append_event(run["id"], str(event["event"]), dict(event["data"]))
+            data = dict(event["data"])
+            if event["event"] == "route":
+                data["run_id"] = run["id"]
+            yield _sse(str(event["event"]), data)
         await asyncio.sleep(0.05)
         events: list[RunEvent] = []
         answer = await asyncio.to_thread(run_orchestrator, request.message, route, events)
         for event in events:
+            run_history.append_event(run["id"], str(event["event"]), dict(event["data"]))
             yield _sse(str(event["event"]), dict(event["data"]))
+        done_data = {
+            "answer": answer,
+            "intent": route.intent,
+            "agents": route.agents,
+            "route": route.as_dict(),
+            "run_id": run["id"],
+        }
+        run_history.append_event(run["id"], "done", done_data)
+        run_history.complete_run(run["id"], answer)
         yield _sse(
             "done",
-            {
-                "answer": answer,
-                "intent": route.intent,
-                "agents": route.agents,
-                "route": route.as_dict(),
-            },
+            done_data,
         )
 
     return StreamingResponse(

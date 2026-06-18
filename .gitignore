@@ -9,6 +9,7 @@ venv/
 
 # Local config
 .env
+.data/
 
 # IDE / OS
 .vs/

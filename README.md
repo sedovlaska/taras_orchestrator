@@ -35,6 +35,9 @@ Open `http://localhost:8000`.
 
 - `GET /health` returns runtime status, AGNO framework name, model, and member list.
 - `GET /tools` returns the typed tool inventory with current policy decisions.
+- `GET /runs` returns recent chat runs from the local audit log.
+- `GET /runs/{run_id}` returns one stored run with its route metadata.
+- `GET /runs/{run_id}/events` returns the persisted event timeline for a run.
 - `POST /chat` returns a complete answer.
 - `POST /chat/stream` streams route, policy, runner, tool, and final answer events for the browser UI.
 - `GET /agents/status` returns the in-process AGNO team member status.
@@ -52,10 +55,17 @@ TOOL_POLICY_MODE=safe
 TOOL_ALLOWED_RISKS=low,medium
 TOOL_ALLOWED=
 TOOL_DENIED=system.list_processes,docker.list_containers,docker.list_images
+RUN_HISTORY_DB_PATH=.data/run_history.sqlite3
 ```
 
 Set `TOOL_POLICY_MODE=off` only in a trusted local environment. You can explicitly allow or deny
 individual tools by id, for example `docker.list_images`.
+
+## Run History
+
+Every chat request is recorded in a local SQLite audit log. The log stores the original message,
+selected route, policy decisions, runner/tool events, final answer, and status. By default this
+database is written under `.data/run_history.sqlite3`, which is ignored by Git.
 
 ## Development Notes
 

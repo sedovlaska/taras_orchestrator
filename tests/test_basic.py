@@ -1,8 +1,10 @@
 import json
 
 import pytest
+from fastapi.testclient import TestClient
 
 from orchestrator.policy import ToolPolicy
+from orchestrator.run_history import RunHistoryStore
 from orchestrator.routing import route_request
 from orchestrator.tool_registry import ToolRisk, get_tool, tools_for_agent
 from shared.config import settings
@@ -14,6 +16,7 @@ def test_settings_defaults():
     assert settings.ollama_host.startswith("http")
     assert settings.orchestrator_port == 8000
     assert settings.tool_policy_mode == "safe"
+    assert settings.run_history_db_path.endswith(".sqlite3")
 
 
 def test_stream_event_sse():
@@ -77,6 +80,53 @@ def test_server_route_agents_keeps_legacy_list_contract():
     from orchestrator.server import route_agents
 
     assert route_agents("please lint this code") == ["code"]
+
+
+def test_run_history_store_persists_runs_and_events(tmp_path):
+    store = RunHistoryStore(tmp_path / "runs.sqlite3")
+    route = route_request("please lint this code").as_dict()
+    run = store.create_run("please lint this code", route)
+
+    stored_event = store.append_event(run["id"], "route", route)
+    store.complete_run(run["id"], "done")
+
+    runs = store.list_runs()
+    detail = store.get_run(run["id"])
+    events = store.list_events(run["id"])
+
+    assert runs[0]["id"] == run["id"]
+    assert runs[0]["answer"] == "done"
+    assert detail["route"]["agents"] == ["code"]
+    assert events == [stored_event]
+    assert events[0]["data"]["intent"] == "code"
+
+
+def test_chat_api_records_run_history(tmp_path, monkeypatch):
+    import orchestrator.server as server
+
+    store = RunHistoryStore(tmp_path / "runs.sqlite3")
+    monkeypatch.setattr(server, "run_history", store)
+
+    def fake_runner(message, route, events):
+        events.append({"event": "runner_start", "data": {"runner": "fake"}})
+        events.append({"event": "runner_result", "data": {"runner": "fake", "status": "ok"}})
+        return f"answer: {message}"
+
+    monkeypatch.setattr(server, "run_orchestrator", fake_runner)
+    client = TestClient(server.app)
+
+    response = client.post("/chat", json={"message": "please lint this code"})
+    payload = response.json()
+    run_id = payload["run_id"]
+    runs = client.get("/runs").json()["runs"]
+    events = client.get(f"/runs/{run_id}/events").json()["events"]
+
+    assert response.status_code == 200
+    assert payload["answer"] == "answer: please lint this code"
+    assert runs[0]["id"] == run_id
+    assert any(event["event"] == "route" for event in events)
+    assert any(event["event"] == "runner_result" for event in events)
+    assert events[-1]["event"] == "done"
 
 
 def test_agno_agents_import_with_model_dependencies():
