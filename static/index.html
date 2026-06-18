@@ -116,6 +116,26 @@
     .timeline-item.error { border-color: #5c2b2b; background: #201313; }
     .timeline-item.ok { border-color: #1f4b3b; }
 
+    .timeline-actions {
+      display: flex;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .timeline-action {
+      border: 1px solid #2a2a4a;
+      background: transparent;
+      color: #c7c9d8;
+      border-radius: 6px;
+      padding: 5px 8px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    .timeline-action:hover { border-color: #60a5fa; color: #fff; }
+    .timeline-action.approve { border-color: #14532d; color: #86efac; }
+    .timeline-action.deny { border-color: #7f1d1d; color: #fca5a5; }
+
     .timeline-kind {
       color: #8a8a9a;
       font-size: 10px;
@@ -387,6 +407,53 @@
       timeline.scrollTop = timeline.scrollHeight;
     }
 
+    function addApprovalTimelineEvent(data) {
+      const empty = timeline.querySelector('.timeline-empty');
+      if (empty) empty.remove();
+      const div = document.createElement('div');
+      div.className = 'timeline-item deny';
+      div.innerHTML = `
+        <div class="timeline-kind">approval required</div>
+        <div class="timeline-title">${escapeHtml(data.tool_id || 'tool')}</div>
+        <div class="timeline-detail">${escapeHtml(data.risk || 'unknown')} risk · expires ${escapeHtml(new Date(data.expires_at).toLocaleString())}</div>
+        <div class="timeline-actions">
+          <button class="timeline-action approve" type="button">Approve</button>
+          <button class="timeline-action deny" type="button">Deny</button>
+        </div>
+      `;
+      div.querySelector('.approve').addEventListener('click', () => resolveApproval(data.approval_id, data.run_id, 'approve'));
+      div.querySelector('.deny').addEventListener('click', () => resolveApproval(data.approval_id, data.run_id, 'deny'));
+      timeline.appendChild(div);
+      timeline.scrollTop = timeline.scrollHeight;
+    }
+
+    async function resolveApproval(approvalId, runId, action) {
+      const resp = await fetch(`/approvals/${encodeURIComponent(approvalId)}/${action}`, { method: 'POST' });
+      const data = await resp.json();
+      if (!resp.ok) {
+        addTimelineEvent('approval error', approvalId, data.detail || 'request failed', 'error');
+        return;
+      }
+      addTimelineEvent('approval', data.approval.tool_id, data.approval.status, data.approval.status === 'approved' ? 'allow' : 'deny');
+      refreshRuns();
+      if (action === 'approve') {
+        resumeRun(runId);
+      }
+    }
+
+    async function resumeRun(runId) {
+      const resp = await fetch(`/runs/${encodeURIComponent(runId)}/resume`, { method: 'POST' });
+      const data = await resp.json();
+      if (!resp.ok) {
+        addTimelineEvent('resume', runId, data.detail || 'not ready', 'error');
+        return;
+      }
+      (data.events || []).forEach(event => timelineFromStoredEvent({ event: event.event, data: event.data || {} }));
+      addMessage(data.answer, 'assistant', data.agents_used || []);
+      refreshRuns();
+      clearActiveAgentsSoon();
+    }
+
     function timelineFromStoredEvent(item) {
       const data = item.data || {};
       switch (item.event) {
@@ -414,8 +481,14 @@
         case 'tool_result':
           addTimelineEvent('tool', data.tool_id || 'tool', data.status || 'finished', 'ok');
           break;
+        case 'approval_required':
+          addApprovalTimelineEvent(data);
+          break;
+        case 'approval_resolved':
+          addTimelineEvent('approval', data.tool_id || 'tool', data.status || 'resolved', data.status === 'approved' ? 'allow' : 'deny');
+          break;
         case 'done':
-          addTimelineEvent('done', data.intent || 'complete', 'final answer recorded', 'ok');
+          addTimelineEvent('done', data.intent || 'complete', data.status || 'final answer recorded', 'ok');
           break;
       }
     }
@@ -759,6 +832,14 @@
                 }
                 case 'tool_result': {
                   addTimelineEvent('tool', data.tool_id, data.status || 'finished', 'ok');
+                  break;
+                }
+                case 'approval_required': {
+                  addApprovalTimelineEvent(data);
+                  break;
+                }
+                case 'approval_resolved': {
+                  addTimelineEvent('approval', data.tool_id, data.status || 'resolved', data.status === 'approved' ? 'allow' : 'deny');
                   break;
                 }
                 case 'agent_result': {

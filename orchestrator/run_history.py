@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -65,6 +65,22 @@ class RunHistoryStore:
 
             CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_run_events_run_id_id ON run_events(run_id, id);
+
+            CREATE TABLE IF NOT EXISTS approvals (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                tool_id TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                risk TEXT NOT NULL,
+                reason TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_approvals_run_id ON approvals(run_id);
+            CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
             """
         )
 
@@ -123,6 +139,111 @@ class RunHistoryStore:
                 "UPDATE runs SET updated_at = ?, status = ?, answer = ? WHERE id = ?",
                 (now, status, answer, run_id),
             )
+
+    def create_approval(self, run_id: str, decision: dict, ttl_seconds: int) -> dict:
+        approval_id = str(uuid4())
+        now_dt = datetime.now(UTC)
+        now = now_dt.isoformat().replace("+00:00", "Z")
+        expires_at = (now_dt + timedelta(seconds=ttl_seconds)).isoformat().replace("+00:00", "Z")
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO approvals
+                    (id, run_id, created_at, updated_at, expires_at, status, tool_id, agent, risk, reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    approval_id,
+                    run_id,
+                    now,
+                    now,
+                    expires_at,
+                    "pending",
+                    decision["tool_id"],
+                    decision["agent"],
+                    decision["risk"],
+                    decision["reason"],
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT id, run_id, created_at, updated_at, expires_at, status, tool_id, agent, risk, reason
+                FROM approvals
+                WHERE id = ?
+                """,
+                (approval_id,),
+            ).fetchone()
+        return self._approval_from_row(row)
+
+    def get_approval(self, approval_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, run_id, created_at, updated_at, expires_at, status, tool_id, agent, risk, reason
+                FROM approvals
+                WHERE id = ?
+                """,
+                (approval_id,),
+            ).fetchone()
+        return self._approval_from_row(row) if row else None
+
+    def list_approvals(self, run_id: str | None = None, status: str | None = None) -> list[dict]:
+        clauses = []
+        values = []
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            values.append(run_id)
+        if status is not None:
+            clauses.append("status = ?")
+            values.append(status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id, run_id, created_at, updated_at, expires_at, status, tool_id, agent, risk, reason
+                FROM approvals
+                {where}
+                ORDER BY created_at DESC
+                """,
+                values,
+            ).fetchall()
+        return [self._approval_from_row(row) for row in rows]
+
+    def resolve_approval(self, approval_id: str, status: str) -> dict | None:
+        now = utc_now()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, run_id, created_at, updated_at, expires_at, status, tool_id, agent, risk, reason
+                FROM approvals
+                WHERE id = ?
+                """,
+                (approval_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            current = self._approval_from_row(row)
+            if current["status"] != "pending":
+                return current
+            if datetime.fromisoformat(current["expires_at"].replace("Z", "+00:00")) < datetime.now(UTC):
+                status = "expired"
+            conn.execute(
+                "UPDATE approvals SET updated_at = ?, status = ? WHERE id = ?",
+                (now, status, approval_id),
+            )
+            updated = conn.execute(
+                """
+                SELECT id, run_id, created_at, updated_at, expires_at, status, tool_id, agent, risk, reason
+                FROM approvals
+                WHERE id = ?
+                """,
+                (approval_id,),
+            ).fetchone()
+        return self._approval_from_row(updated)
+
+    def approvals_ready(self, run_id: str) -> bool:
+        approvals = self.list_approvals(run_id=run_id)
+        return bool(approvals) and all(approval["status"] == "approved" for approval in approvals)
 
     def list_runs(self, limit: int = 50) -> list[dict]:
         bounded_limit = min(max(limit, 1), 200)
@@ -185,4 +306,18 @@ class RunHistoryStore:
             "created_at": row["created_at"],
             "event": row["event"],
             "data": json.loads(row["data_json"]),
+        }
+
+    def _approval_from_row(self, row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"],
+            "run_id": row["run_id"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "expires_at": row["expires_at"],
+            "status": row["status"],
+            "tool_id": row["tool_id"],
+            "agent": row["agent"],
+            "risk": row["risk"],
+            "reason": row["reason"],
         }

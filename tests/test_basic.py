@@ -115,18 +115,77 @@ def test_chat_api_records_run_history(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "run_orchestrator", fake_runner)
     client = TestClient(server.app)
 
-    response = client.post("/chat", json={"message": "please lint this code"})
+    response = client.post("/chat", json={"message": "cpu status"})
     payload = response.json()
     run_id = payload["run_id"]
     runs = client.get("/runs").json()["runs"]
     events = client.get(f"/runs/{run_id}/events").json()["events"]
 
     assert response.status_code == 200
-    assert payload["answer"] == "answer: please lint this code"
+    assert payload["answer"] == "answer: cpu status"
     assert runs[0]["id"] == run_id
     assert any(event["event"] == "route" for event in events)
     assert any(event["event"] == "runner_result" for event in events)
     assert events[-1]["event"] == "done"
+
+
+def test_chat_api_requires_approval_before_medium_risk_tools(tmp_path, monkeypatch):
+    import orchestrator.server as server
+
+    store = RunHistoryStore(tmp_path / "runs.sqlite3")
+    monkeypatch.setattr(server, "run_history", store)
+    called = {"runner": False}
+
+    def fake_runner(message, route, events):
+        called["runner"] = True
+        events.append({"event": "runner_result", "data": {"runner": "fake", "status": "ok"}})
+        return f"answer: {message}"
+
+    monkeypatch.setattr(server, "run_orchestrator", fake_runner)
+    client = TestClient(server.app)
+
+    response = client.post("/chat", json={"message": "please lint this code"})
+    payload = response.json()
+    approvals = client.get("/approvals", params={"run_id": payload["run_id"]}).json()["approvals"]
+    events = client.get(f"/runs/{payload['run_id']}/events").json()["events"]
+    run = client.get(f"/runs/{payload['run_id']}").json()["run"]
+
+    assert response.status_code == 200
+    assert called["runner"] is False
+    assert run["status"] == "waiting_approval"
+    assert payload["answer"].startswith("Tool approval required")
+    assert [approval["tool_id"] for approval in approvals] == ["code.lint_code"]
+    assert any(event["event"] == "approval_required" for event in events)
+
+    approval_id = approvals[0]["id"]
+    approved = client.post(f"/approvals/{approval_id}/approve").json()["approval"]
+    resumed = client.post(f"/runs/{payload['run_id']}/resume").json()
+
+    assert approved["status"] == "approved"
+    assert called["runner"] is True
+    assert resumed["answer"] == "answer: please lint this code"
+    assert client.get(f"/runs/{payload['run_id']}").json()["run"]["status"] == "completed"
+
+
+def test_deny_approval_marks_run_denied(tmp_path, monkeypatch):
+    import orchestrator.server as server
+
+    store = RunHistoryStore(tmp_path / "runs.sqlite3")
+    monkeypatch.setattr(server, "run_history", store)
+    monkeypatch.setattr(server, "run_orchestrator", lambda message, route, events: "unexpected")
+    client = TestClient(server.app)
+
+    response = client.post("/chat", json={"message": "please lint this code"})
+    run_id = response.json()["run_id"]
+    approval_id = client.get("/approvals", params={"run_id": run_id}).json()["approvals"][0]["id"]
+
+    denied = client.post(f"/approvals/{approval_id}/deny").json()["approval"]
+    resume = client.post(f"/runs/{run_id}/resume")
+    run = client.get(f"/runs/{run_id}").json()["run"]
+
+    assert denied["status"] == "denied"
+    assert resume.status_code == 409
+    assert run["status"] == "denied"
 
 
 def test_agno_agents_import_with_model_dependencies():

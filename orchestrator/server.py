@@ -65,6 +65,59 @@ def record_events(run_id: str, events: list[RunEvent]) -> None:
     for event in events:
         run_history.append_event(run_id, str(event["event"]), dict(event["data"]))
 
+
+def approval_required_risks() -> set[str]:
+    return {
+        risk.strip().lower()
+        for risk in settings.tool_approval_required_risks.split(",")
+        if risk.strip()
+    }
+
+
+def create_required_approvals(run_id: str, route: RoutingResult) -> list[dict]:
+    approvals = []
+    for decision in route.policy_decisions:
+        if decision["allowed"] and decision["risk"] in approval_required_risks():
+            approval = run_history.create_approval(
+                run_id,
+                decision,
+                ttl_seconds=settings.tool_approval_ttl_seconds,
+            )
+            approvals.append(approval)
+            run_history.append_event(
+                run_id,
+                "approval_required",
+                {
+                    "approval_id": approval["id"],
+                    "run_id": run_id,
+                    "tool_id": approval["tool_id"],
+                    "agent": approval["agent"],
+                    "risk": approval["risk"],
+                    "expires_at": approval["expires_at"],
+                },
+            )
+    return approvals
+
+
+def approval_required_event(approval: dict) -> RunEvent:
+    return {
+        "event": "approval_required",
+        "data": {
+            "approval_id": approval["id"],
+            "run_id": approval["run_id"],
+            "tool_id": approval["tool_id"],
+            "agent": approval["agent"],
+            "risk": approval["risk"],
+            "expires_at": approval["expires_at"],
+        },
+    }
+
+
+def approval_waiting_answer(approvals: list[dict]) -> str:
+    tools = ", ".join(approval["tool_id"] for approval in approvals)
+    return f"Tool approval required before execution: {tools}"
+
+
 def system_status(events: list[RunEvent] | None = None) -> str:
     policy = current_policy()
     for tool_id in ("system.get_system_info", "system.get_disk_usage"):
@@ -329,6 +382,81 @@ async def run_events(run_id: str):
     return {"events": run_history.list_events(run_id)}
 
 
+@app.get("/approvals")
+async def approvals(status: str | None = None, run_id: str | None = None):
+    return {"approvals": run_history.list_approvals(run_id=run_id, status=status)}
+
+
+@app.post("/approvals/{approval_id}/approve")
+async def approve(approval_id: str):
+    approval = run_history.resolve_approval(approval_id, "approved")
+    if approval is None:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    run_history.append_event(
+        approval["run_id"],
+        "approval_resolved",
+        {
+            "approval_id": approval["id"],
+            "tool_id": approval["tool_id"],
+            "status": approval["status"],
+        },
+    )
+    return {"approval": approval}
+
+
+@app.post("/approvals/{approval_id}/deny")
+async def deny(approval_id: str):
+    approval = run_history.resolve_approval(approval_id, "denied")
+    if approval is None:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    run_history.append_event(
+        approval["run_id"],
+        "approval_resolved",
+        {
+            "approval_id": approval["id"],
+            "tool_id": approval["tool_id"],
+            "status": approval["status"],
+        },
+    )
+    if approval["status"] == "denied":
+        run_history.complete_run(approval["run_id"], "Tool approval denied.", status="denied")
+    return {"approval": approval}
+
+
+@app.post("/runs/{run_id}/resume", response_model=ChatResponse)
+async def resume_run(run_id: str):
+    run = run_history.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run["status"] != "waiting_approval":
+        raise HTTPException(status_code=409, detail="Run is not waiting for approval")
+    if not run_history.approvals_ready(run_id):
+        raise HTTPException(status_code=409, detail="Run still has unresolved approvals")
+
+    resume_event = {"event": "resume", "data": {"run_id": run_id}}
+    run_history.append_event(run_id, "resume", resume_event["data"])
+    events: list[RunEvent] = []
+    answer = run_orchestrator(run["message"], run["agents"], events)
+    record_events(run_id, events)
+    done_data = {
+        "answer": answer,
+        "intent": run["intent"],
+        "agents": run["agents"],
+        "route": run["route"],
+        "run_id": run_id,
+        "status": "completed",
+    }
+    run_history.append_event(run_id, "done", done_data)
+    run_history.complete_run(run_id, answer)
+    return ChatResponse(
+        answer=answer,
+        agents_used=run["agents"],
+        route=run["route"],
+        events=[resume_event] + events + [{"event": "done", "data": done_data}],
+        run_id=run_id,
+    )
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     html_file = STATIC_DIR / "index.html"
@@ -341,6 +469,18 @@ async def chat(request: ChatRequest):
     run = run_history.create_run(request.message, route.as_dict())
     initial_events = initial_run_events(route)
     record_events(run["id"], initial_events)
+    approvals = create_required_approvals(run["id"], route)
+    if approvals:
+        answer = approval_waiting_answer(approvals)
+        run_history.complete_run(run["id"], answer, status="waiting_approval")
+        approval_events = [approval_required_event(approval) for approval in approvals]
+        return ChatResponse(
+            answer=answer,
+            agents_used=route.agents,
+            route=route.as_dict(),
+            events=initial_events + approval_events,
+            run_id=run["id"],
+        )
     events: list[RunEvent] = []
     answer = run_orchestrator(request.message, route, events)
     record_events(run["id"], events)
@@ -372,6 +512,24 @@ async def chat_stream(request: ChatRequest):
             if event["event"] == "route":
                 data["run_id"] = run["id"]
             yield _sse(str(event["event"]), data)
+        approvals = create_required_approvals(run["id"], route)
+        if approvals:
+            answer = approval_waiting_answer(approvals)
+            run_history.complete_run(run["id"], answer, status="waiting_approval")
+            for approval in approvals:
+                yield _sse("approval_required", approval_required_event(approval)["data"])
+            yield _sse(
+                "done",
+                {
+                    "answer": answer,
+                    "intent": route.intent,
+                    "agents": route.agents,
+                    "route": route.as_dict(),
+                    "run_id": run["id"],
+                    "status": "waiting_approval",
+                },
+            )
+            return
         await asyncio.sleep(0.05)
         events: list[RunEvent] = []
         answer = await asyncio.to_thread(run_orchestrator, request.message, route, events)
