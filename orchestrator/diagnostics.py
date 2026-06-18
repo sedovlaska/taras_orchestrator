@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from orchestrator.context_packs import ContextPackStore
+from orchestrator.ollama import list_ollama_models
 from orchestrator.run_history import RunHistoryStore
 from orchestrator.tool_registry import tool_inventory
 from orchestrator.workspace import list_workspace_files
@@ -29,9 +31,11 @@ class DiagnosticCheck:
 def build_diagnostics(
     run_history: RunHistoryStore | None = None,
     context_packs: ContextPackStore | None = None,
+    model_lister: Callable[[], dict] | None = None,
 ) -> dict[str, object]:
     run_history = run_history or RunHistoryStore.from_settings()
     context_packs = context_packs or ContextPackStore.from_settings()
+    model_lister = model_lister or list_ollama_models
     checks = [
         _settings_check(),
         _tool_inventory_check(),
@@ -39,6 +43,7 @@ def build_diagnostics(
         _store_check("run_history", "Run history database", run_history.db_path),
         _store_check("context_packs", "Context pack database", context_packs.db_path),
         _model_config_check(),
+        _ollama_runtime_check(model_lister),
     ]
     status = _overall_status(checks)
     return {
@@ -103,6 +108,44 @@ def _model_config_check() -> DiagnosticCheck:
         "ok",
         "Model config",
         f"{settings.llm_model} via {settings.ollama_host}.",
+    )
+
+
+def _ollama_runtime_check(model_lister: Callable[[], dict] = list_ollama_models) -> DiagnosticCheck:
+    """Actively query Ollama's tags to confirm it is reachable and the model is pulled.
+
+    Uses the short-timeout helper so this never hangs when Ollama is down.
+    """
+    try:
+        result = model_lister()
+    except Exception as exc:  # pragma: no cover - helper degrades gracefully itself
+        return DiagnosticCheck(
+            "ollama_runtime",
+            "error",
+            "Ollama runtime",
+            f"Could not query Ollama at {settings.ollama_host}: {exc}",
+        )
+    if not result.get("reachable"):
+        return DiagnosticCheck(
+            "ollama_runtime",
+            "error",
+            "Ollama runtime",
+            f"Ollama is unreachable at {settings.ollama_host}. Is `ollama serve` running?",
+        )
+    models = result.get("models", [])
+    if settings.llm_model not in models:
+        return DiagnosticCheck(
+            "ollama_runtime",
+            "warn",
+            "Ollama runtime",
+            f"Ollama is reachable but model '{settings.llm_model}' is not pulled. "
+            f"Run `ollama pull {settings.llm_model}`.",
+        )
+    return DiagnosticCheck(
+        "ollama_runtime",
+        "ok",
+        "Ollama runtime",
+        f"Ollama reachable; model '{settings.llm_model}' is available.",
     )
 
 
