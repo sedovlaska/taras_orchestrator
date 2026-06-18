@@ -16,6 +16,7 @@ from orchestrator.command_runner import run_command
 from orchestrator.context_bundles import build_context_bundle
 from orchestrator.context_packs import ContextPackStore
 from orchestrator.diagnostics import build_diagnostics
+from orchestrator.evals import list_eval_cases, run_eval_suite
 from orchestrator.policy import current_policy
 from orchestrator.routing import RoutingResult, route_request, should_use_local_system_status
 from orchestrator.runbooks import get_runbook, list_runbooks, render_runbook
@@ -375,6 +376,16 @@ async def health():
 @app.get("/diagnostics")
 async def diagnostics():
     return {"diagnostics": build_diagnostics(run_history, context_pack_store)}
+
+
+@app.get("/evals")
+async def evals():
+    return {"cases": list_eval_cases()}
+
+
+@app.post("/evals/run")
+async def run_evals():
+    return {"suite": run_eval_suite()}
 
 
 @app.get("/tools")

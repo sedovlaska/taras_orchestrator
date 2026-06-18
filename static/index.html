@@ -304,6 +304,25 @@
       word-break: break-word;
     }
 
+    .eval-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 160px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+
+    .eval-item {
+      border: 1px solid #292943;
+      background: #101016;
+      border-radius: 8px;
+      padding: 7px 8px;
+    }
+
+    .eval-item.pass { border-color: #14532d; }
+    .eval-item.fail { border-color: #7f1d1d; }
+
     .runbook-select,
     .runbook-field,
     .runbook-textarea {
@@ -702,6 +721,17 @@
     <div class="diagnostics-list" id="diagnostics-list">
       <div class="workspace-empty">Diagnostics not loaded.</div>
     </div>
+    <h2>Evals</h2>
+    <div class="analytics-grid">
+      <div class="metric-box">
+        <div class="metric-value" id="eval-pass-rate">-</div>
+        <div class="metric-label">pass rate</div>
+      </div>
+      <button class="workspace-btn" id="eval-run-btn" type="button">Run</button>
+    </div>
+    <div class="eval-list" id="eval-list">
+      <div class="workspace-empty">Evals not run.</div>
+    </div>
     <h2>Workspace</h2>
     <div class="workspace-controls">
       <input class="workspace-input" id="workspace-query" type="search" placeholder="Search files">
@@ -755,6 +785,9 @@
     const diagnosticsStatus = document.getElementById('diagnostics-status');
     const diagnosticsList = document.getElementById('diagnostics-list');
     const diagnosticsRefreshBtn = document.getElementById('diagnostics-refresh-btn');
+    const evalPassRate = document.getElementById('eval-pass-rate');
+    const evalList = document.getElementById('eval-list');
+    const evalRunBtn = document.getElementById('eval-run-btn');
     const workspaceQuery = document.getElementById('workspace-query');
     const workspaceList = document.getElementById('workspace-list');
     const workspacePreview = document.getElementById('workspace-preview');
@@ -980,6 +1013,34 @@
         diagnosticsStatus.textContent = 'error';
         diagnosticsStatus.style.color = '#f87171';
         diagnosticsList.innerHTML = `<div class="workspace-empty">${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    function renderEvalSuite(suite) {
+      evalPassRate.textContent = `${Math.round((suite.pass_rate || 0) * 100)}%`;
+      evalPassRate.style.color = suite.failed ? '#f87171' : '#4ade80';
+      evalList.innerHTML = (suite.results || []).map(result => `
+        <div class="eval-item ${result.passed ? 'pass' : 'fail'}">
+          <div class="diagnostic-title">
+            <span>${escapeHtml(result.id)}</span>
+            <strong>${result.passed ? 'pass' : 'fail'}</strong>
+          </div>
+          <div class="diagnostic-detail">${escapeHtml(result.failures?.join('; ') || result.reason || '')}</div>
+        </div>
+      `).join('') || '<div class="workspace-empty">No eval results.</div>';
+    }
+
+    async function runEvals() {
+      try {
+        evalList.innerHTML = '<div class="workspace-empty">Running evals...</div>';
+        const resp = await fetch('/evals/run', { method: 'POST' });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || 'eval run failed');
+        renderEvalSuite(data.suite || {});
+      } catch (err) {
+        evalPassRate.textContent = 'err';
+        evalPassRate.style.color = '#f87171';
+        evalList.innerHTML = `<div class="workspace-empty">${escapeHtml(err.message)}</div>`;
       }
     }
 
@@ -1673,6 +1734,7 @@
     contextSearchBtn.addEventListener('click', attachWorkspaceSearch);
     contextPackSaveBtn.addEventListener('click', saveContextPack);
     diagnosticsRefreshBtn.addEventListener('click', refreshDiagnostics);
+    evalRunBtn.addEventListener('click', runEvals);
     workspaceQuery.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();

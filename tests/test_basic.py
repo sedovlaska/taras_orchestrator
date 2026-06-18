@@ -381,6 +381,31 @@ def test_diagnostics_api_uses_current_stores(tmp_path, monkeypatch):
     assert payload["counts"]["ok"] >= 5
 
 
+def test_eval_suite_passes_current_routing_expectations():
+    from orchestrator.evals import list_eval_cases, run_eval_suite
+
+    cases = list_eval_cases()
+    suite = run_eval_suite()
+
+    assert len(cases) >= 5
+    assert suite["total"] == len(cases)
+    assert suite["failed"] == 0
+    assert suite["pass_rate"] == 1
+    assert any(result["id"] == "route_workspace_search_to_code" for result in suite["results"])
+
+
+def test_eval_api_lists_and_runs_suite():
+    import orchestrator.server as server
+
+    client = TestClient(server.app)
+    listing = client.get("/evals")
+    run = client.post("/evals/run")
+
+    assert listing.status_code == 200
+    assert run.status_code == 200
+    assert run.json()["suite"]["failed"] == 0
+
+
 def test_index_exposes_runbook_controls():
     import orchestrator.server as server
 
@@ -393,6 +418,7 @@ def test_index_exposes_runbook_controls():
     assert 'id="context-pack-save-btn"' in html
     assert 'id="diagnostics-refresh-btn"' in html
     assert "exportRunTrace" in html
+    assert 'id="eval-run-btn"' in html
 
 
 def test_run_history_store_persists_runs_and_events(tmp_path):
