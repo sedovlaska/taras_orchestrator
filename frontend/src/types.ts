@@ -115,3 +115,18 @@ export type ChatMessage = {
   content: string;
   agents?: string[];
 };
+
+export type Conversation = {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ConversationMessage = {
+  id: number;
+  conversation_id: string;
+  created_at: string;
+  role: string;
+  content: string;
+};
