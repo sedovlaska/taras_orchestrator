@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import subprocess
-
 import psutil
 from agno.agent import Agent
 from agno.models.ollama import Ollama
 from agno.team import Team
 from agno.tools import tool
 
+from orchestrator.command_runner import run_command
 from orchestrator.policy import current_policy
 from orchestrator.tool_registry import AGNO_MEMBER_NAMES
 from shared.config import settings
@@ -33,8 +32,8 @@ def create_code_agent() -> Agent:
         policy = current_policy()
         policy.require("code.lint_code")
         safe_path = str(policy.require_project_path(path))
-        result = subprocess.run(["ruff", "check", safe_path], capture_output=True, text=True, timeout=30)
-        return result.stdout or result.stderr or "No issues found."
+        result = run_command(["ruff", "check", safe_path], timeout_seconds=30)
+        return result.output or "No issues found."
 
     @tool
     def generate_code(description: str) -> str:
@@ -88,8 +87,8 @@ def create_devops_agent() -> Agent:
         policy = current_policy()
         policy.require("devops.run_tests")
         safe_path = str(policy.require_project_path(path))
-        result = subprocess.run(["pytest", safe_path], capture_output=True, text=True, timeout=120)
-        return result.stdout or result.stderr or "Tests completed without output."
+        result = run_command(["pytest", safe_path], timeout_seconds=120)
+        return result.output or "Tests completed without output."
 
     @tool
     def build_project() -> str:
@@ -176,15 +175,15 @@ def create_docker_agent() -> Agent:
     def list_containers() -> str:
         """List Docker containers."""
         current_policy().require("docker.list_containers")
-        result = subprocess.run(["docker", "ps", "-a"], capture_output=True, text=True, timeout=10)
-        return result.stdout or result.stderr or "No containers found."
+        result = run_command(["docker", "ps", "-a"], timeout_seconds=10)
+        return result.output or "No containers found."
 
     @tool
     def list_images() -> str:
         """List Docker images."""
         current_policy().require("docker.list_images")
-        result = subprocess.run(["docker", "images"], capture_output=True, text=True, timeout=10)
-        return result.stdout or result.stderr or "No images found."
+        result = run_command(["docker", "images"], timeout_seconds=10)
+        return result.output or "No images found."
 
     return Agent(
         name="docker",

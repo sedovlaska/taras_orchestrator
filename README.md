@@ -62,11 +62,16 @@ TOOL_DENIED=system.list_processes,docker.list_containers,docker.list_images
 TOOL_APPROVAL_REQUIRED_RISKS=medium,high
 TOOL_APPROVAL_TTL_SECONDS=600
 RUN_HISTORY_DB_PATH=.data/run_history.sqlite3
+COMMAND_ALLOWED_EXECUTABLES=python,ollama,ruff,pytest,docker
+COMMAND_OUTPUT_MAX_CHARS=12000
+COMMAND_ENV_ALLOWLIST=PATH,Path,PATHEXT,SYSTEMROOT,SystemRoot,WINDIR,COMSPEC,ComSpec,TEMP,TMP,HOME,USERPROFILE,LOCALAPPDATA,APPDATA,PYTHONPATH,OLLAMA_HOST,NO_PROXY,no_proxy,PYTHONIOENCODING
 ```
 
 Set `TOOL_POLICY_MODE=off` only in a trusted local environment. You can explicitly allow or deny
 individual tools by id, for example `docker.list_images`. Allowed tools with risk levels listed in
 `TOOL_APPROVAL_REQUIRED_RISKS` are paused until approved through the local approval API or UI.
+All local subprocess execution goes through a central command runner that enforces executable
+allowlists, project-root working directories, environment allowlists, timeouts, and output limits.
 
 ## Run History
 
