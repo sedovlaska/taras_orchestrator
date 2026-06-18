@@ -49,6 +49,10 @@ Open `http://localhost:8000`.
 - `GET /runbooks/{runbook_id}` returns one runbook and its template.
 - `POST /runbooks/{runbook_id}/render` renders a runbook prompt from provided field values.
 - `POST /context/bundle` builds a bounded prompt context from workspace files and search results.
+- `GET /context/packs` returns saved reusable context pack definitions.
+- `POST /context/packs` saves a context pack made from workspace paths and/or search query.
+- `POST /context/packs/{pack_id}/bundle` renders a saved context pack into prompt context.
+- `DELETE /context/packs/{pack_id}` removes a saved context pack.
 - `POST /chat` returns a complete answer.
 - `POST /chat/stream` streams route, policy, runner, tool, and final answer events for the browser UI.
 - `GET /agents/status` returns the in-process AGNO team member status.
@@ -77,6 +81,7 @@ WORKSPACE_MAX_FILE_BYTES=1048576
 WORKSPACE_MAX_FILE_CHARS=40000
 WORKSPACE_MAX_SEARCH_RESULTS=100
 CONTEXT_BUNDLE_MAX_CHARS=12000
+CONTEXT_PACK_DB_PATH=.data/context_packs.sqlite3
 ```
 
 Set `TOOL_POLICY_MODE=off` only in a trusted local environment. You can explicitly allow or deny
@@ -104,6 +109,10 @@ The `/context/bundle` API packages selected workspace files and search results i
 Markdown context block for chat prompts. The browser UI exposes this through `Attach file` and
 `Attach search` actions in the Workspace panel. Bundles reuse the workspace path, binary, ignore,
 and size safeguards, and then apply `CONTEXT_BUNDLE_MAX_CHARS` to keep prompts manageable.
+
+Saved context packs persist named path/search bundles in a local SQLite database at
+`CONTEXT_PACK_DB_PATH`. The UI can save the current selected file/search, apply a saved pack into
+the chat prompt, or delete stale packs.
 
 ## Run History
 

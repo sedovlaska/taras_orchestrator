@@ -21,6 +21,7 @@ def test_settings_defaults():
     assert settings.run_history_db_path.endswith(".sqlite3")
     assert settings.workspace_max_file_chars > 0
     assert settings.context_bundle_max_chars > 0
+    assert settings.context_pack_db_path.endswith(".sqlite3")
 
 
 def test_stream_event_sse():
@@ -274,6 +275,68 @@ def test_context_bundle_api_builds_prompt_context(tmp_path, monkeypatch):
     assert invalid.status_code == 422
 
 
+def test_context_pack_store_persists_updates_bundles_and_deletes(tmp_path, monkeypatch):
+    import orchestrator.workspace as workspace
+    from orchestrator.context_packs import ContextPackStore
+
+    (tmp_path / "notes.txt").write_text("saved context pack\n", encoding="utf-8")
+    monkeypatch.setattr(workspace, "PROJECT_ROOT", tmp_path.resolve())
+    monkeypatch.setattr(settings, "workspace_max_file_bytes", 1024)
+    monkeypatch.setattr(settings, "workspace_max_file_chars", 100)
+    monkeypatch.setattr(settings, "context_bundle_max_chars", 500)
+    store = ContextPackStore(tmp_path / "packs.sqlite3")
+
+    pack = store.create_pack(name="Review pack", paths=["notes.txt"], query="saved")
+    updated = store.update_pack(pack["id"], name="Updated pack", paths=["notes.txt"])
+    bundle = store.build_bundle(pack["id"])
+
+    assert store.list_packs()[0]["id"] == pack["id"]
+    assert updated["name"] == "Updated pack"
+    assert bundle["pack"]["id"] == pack["id"]
+    assert "saved context pack" in bundle["bundle"]["prompt_context"]
+    assert store.delete_pack(pack["id"]) is True
+    assert store.get_pack(pack["id"]) is None
+    with pytest.raises(ValueError):
+        store.create_pack(name="", paths=["notes.txt"])
+
+
+def test_context_pack_api_crud_and_bundle(tmp_path, monkeypatch):
+    import orchestrator.server as server
+    import orchestrator.workspace as workspace
+    from orchestrator.context_packs import ContextPackStore
+
+    (tmp_path / "README.md").write_text("api context pack\n", encoding="utf-8")
+    monkeypatch.setattr(workspace, "PROJECT_ROOT", tmp_path.resolve())
+    monkeypatch.setattr(settings, "workspace_max_file_bytes", 1024)
+    monkeypatch.setattr(settings, "workspace_max_file_chars", 100)
+    monkeypatch.setattr(settings, "context_bundle_max_chars", 500)
+    monkeypatch.setattr(server, "context_pack_store", ContextPackStore(tmp_path / "packs.sqlite3"))
+    client = TestClient(server.app)
+
+    created = client.post(
+        "/context/packs",
+        json={"name": "API pack", "paths": ["README.md"], "query": "context"},
+    )
+    pack_id = created.json()["pack"]["id"]
+    listing = client.get("/context/packs").json()["packs"]
+    rendered = client.post(f"/context/packs/{pack_id}/bundle").json()
+    updated = client.put(
+        f"/context/packs/{pack_id}",
+        json={"name": "Renamed pack", "paths": ["README.md"]},
+    ).json()["pack"]
+    deleted = client.delete(f"/context/packs/{pack_id}")
+    missing = client.get(f"/context/packs/{pack_id}")
+    invalid = client.post("/context/packs", json={"name": "Invalid"})
+
+    assert created.status_code == 200
+    assert listing[0]["name"] == "API pack"
+    assert "api context pack" in rendered["bundle"]["prompt_context"]
+    assert updated["name"] == "Renamed pack"
+    assert deleted.status_code == 200
+    assert missing.status_code == 404
+    assert invalid.status_code == 422
+
+
 def test_index_exposes_runbook_controls():
     import orchestrator.server as server
 
@@ -283,6 +346,7 @@ def test_index_exposes_runbook_controls():
     assert 'id="runbook-select"' in html
     assert "loadRunbooks()" in html
     assert 'id="context-file-btn"' in html
+    assert 'id="context-pack-save-btn"' in html
 
 
 def test_run_history_store_persists_runs_and_events(tmp_path):
