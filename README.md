@@ -36,6 +36,7 @@ Open `http://localhost:8000`.
 - `GET /health` returns runtime status, AGNO framework name, model, and member list.
 - `GET /tools` returns the typed tool inventory with current policy decisions.
 - `GET /runs` returns recent chat runs from the local audit log.
+- `GET /runs/summary` returns aggregate run analytics for the browser dashboard.
 - `GET /runs/{run_id}` returns one stored run with its route metadata.
 - `GET /runs/{run_id}/events` returns the persisted event timeline for a run.
 - `GET /approvals` returns pending or historical tool approvals.
@@ -119,6 +120,9 @@ the chat prompt, or delete stale packs.
 Every chat request is recorded in a local SQLite audit log. The log stores the original message,
 selected route, policy decisions, runner/tool events, final answer, and status. By default this
 database is written under `.data/run_history.sqlite3`, which is ignored by Git.
+
+The browser UI also shows summary analytics derived from the audit log: total runs, status counts,
+agent usage, approval status counts, event counts, and recent runner errors.
 
 ## Development Notes
 

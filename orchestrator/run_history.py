@@ -259,6 +259,89 @@ class RunHistoryStore:
             ).fetchall()
         return [self._run_from_row(row, include_route=False) for row in rows]
 
+    def summary(self) -> dict:
+        with self._connect() as conn:
+            totals = conn.execute("SELECT COUNT(*) AS count FROM runs").fetchone()
+            status_rows = conn.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM runs
+                GROUP BY status
+                ORDER BY count DESC, status ASC
+                """
+            ).fetchall()
+            intent_rows = conn.execute(
+                """
+                SELECT intent, COUNT(*) AS count
+                FROM runs
+                GROUP BY intent
+                ORDER BY count DESC, intent ASC
+                LIMIT 12
+                """
+            ).fetchall()
+            event_rows = conn.execute(
+                """
+                SELECT event, COUNT(*) AS count
+                FROM run_events
+                GROUP BY event
+                ORDER BY count DESC, event ASC
+                LIMIT 12
+                """
+            ).fetchall()
+            recent_errors = conn.execute(
+                """
+                SELECT run_id, created_at, event, data_json
+                FROM run_events
+                WHERE event IN ('runner_error', 'error')
+                ORDER BY id DESC
+                LIMIT 10
+                """
+            ).fetchall()
+            approval_rows = conn.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM approvals
+                GROUP BY status
+                ORDER BY count DESC, status ASC
+                """
+            ).fetchall()
+            runs = conn.execute(
+                """
+                SELECT agents_json
+                FROM runs
+                ORDER BY created_at DESC
+                LIMIT 500
+                """
+            ).fetchall()
+
+        agent_counts: dict[str, int] = {}
+        for row in runs:
+            for agent in json.loads(row["agents_json"]):
+                agent_counts[agent] = agent_counts.get(agent, 0) + 1
+
+        return {
+            "total_runs": totals["count"],
+            "by_status": [{"status": row["status"], "count": row["count"]} for row in status_rows],
+            "by_intent": [{"intent": row["intent"], "count": row["count"]} for row in intent_rows],
+            "by_agent": [
+                {"agent": agent, "count": count}
+                for agent, count in sorted(agent_counts.items(), key=lambda item: (-item[1], item[0]))
+            ],
+            "by_event": [{"event": row["event"], "count": row["count"]} for row in event_rows],
+            "approvals": [
+                {"status": row["status"], "count": row["count"]} for row in approval_rows
+            ],
+            "recent_errors": [
+                {
+                    "run_id": row["run_id"],
+                    "created_at": row["created_at"],
+                    "event": row["event"],
+                    "data": json.loads(row["data_json"]),
+                }
+                for row in recent_errors
+            ],
+        }
+
     def get_run(self, run_id: str) -> dict | None:
         with self._connect() as conn:
             row = conn.execute(

@@ -368,6 +368,23 @@ def test_run_history_store_persists_runs_and_events(tmp_path):
     assert events[0]["data"]["intent"] == "code"
 
 
+def test_run_history_summary_counts_status_agents_events_and_errors(tmp_path):
+    store = RunHistoryStore(tmp_path / "runs.sqlite3")
+    route = route_request("please lint this code").as_dict()
+    run = store.create_run("please lint this code", route)
+    store.append_event(run["id"], "route", route)
+    store.append_event(run["id"], "runner_error", {"runner": "fake", "message": "boom"})
+    store.complete_run(run["id"], "failed", status="failed")
+
+    summary = store.summary()
+
+    assert summary["total_runs"] == 1
+    assert summary["by_status"] == [{"status": "failed", "count": 1}]
+    assert summary["by_agent"] == [{"agent": "code", "count": 1}]
+    assert any(row["event"] == "runner_error" for row in summary["by_event"])
+    assert summary["recent_errors"][0]["data"]["message"] == "boom"
+
+
 def test_chat_api_records_run_history(tmp_path, monkeypatch):
     import orchestrator.server as server
 
@@ -394,6 +411,23 @@ def test_chat_api_records_run_history(tmp_path, monkeypatch):
     assert any(event["event"] == "route" for event in events)
     assert any(event["event"] == "runner_result" for event in events)
     assert events[-1]["event"] == "done"
+
+
+def test_run_summary_api_uses_current_history_store(tmp_path, monkeypatch):
+    import orchestrator.server as server
+
+    store = RunHistoryStore(tmp_path / "runs.sqlite3")
+    monkeypatch.setattr(server, "run_history", store)
+    run = store.create_run("cpu status", route_request("cpu status").as_dict())
+    store.complete_run(run["id"], "done")
+    client = TestClient(server.app)
+
+    response = client.get("/runs/summary")
+    payload = response.json()["summary"]
+
+    assert response.status_code == 200
+    assert payload["total_runs"] == 1
+    assert payload["by_status"] == [{"status": "completed", "count": 1}]
 
 
 def test_chat_api_requires_approval_before_medium_risk_tools(tmp_path, monkeypatch):
