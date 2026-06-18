@@ -45,6 +45,9 @@ Open `http://localhost:8000`.
 - `GET /workspace/files` returns project-scoped text file metadata.
 - `GET /workspace/file?path=README.md` returns one project-scoped text file with truncation metadata.
 - `POST /workspace/search` searches project-scoped text files for a query.
+- `GET /runbooks` returns reusable prompt runbooks for common repo workflows.
+- `GET /runbooks/{runbook_id}` returns one runbook and its template.
+- `POST /runbooks/{runbook_id}/render` renders a runbook prompt from provided field values.
 - `POST /chat` returns a complete answer.
 - `POST /chat/stream` streams route, policy, runner, tool, and final answer events for the browser UI.
 - `GET /agents/status` returns the in-process AGNO team member status.
@@ -85,6 +88,13 @@ allowlists, project-root working directories, environment allowlists, timeouts, 
 The code agent and browser UI can list, preview, and search files under the project root. These
 tools are read-only, reject path escapes, skip ignored runtime directories such as `.git`, `.data`,
 and caches, reject binary files, and apply byte, character, and result limits from `.env`.
+
+## Runbooks
+
+The browser UI includes reusable runbooks for repo onboarding, feature planning, code review, test
+failure triage, and docs updates. Each runbook declares its fields and renders to a normal chat
+prompt through the `/runbooks/{runbook_id}/render` API, so users can inspect or edit the generated
+prompt before running it.
 
 ## Run History
 
