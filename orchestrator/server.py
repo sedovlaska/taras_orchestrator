@@ -13,6 +13,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from orchestrator.command_runner import run_command
+from orchestrator.context_bundles import build_context_bundle
 from orchestrator.policy import current_policy
 from orchestrator.routing import RoutingResult, route_request, should_use_local_system_status
 from orchestrator.runbooks import get_runbook, list_runbooks, render_runbook
@@ -48,6 +49,13 @@ class WorkspaceSearchRequest(BaseModel):
 
 class RunbookRenderRequest(BaseModel):
     values: dict[str, str] = Field(default_factory=dict)
+
+
+class ContextBundleRequest(BaseModel):
+    paths: list[str] = Field(default_factory=list)
+    query: str | None = None
+    search_limit: int = 20
+    max_chars: int | None = None
 
 
 def route_agents(message: str) -> list[str]:
@@ -405,6 +413,19 @@ async def render_runbook_prompt(runbook_id: str, request: RunbookRenderRequest):
         return render_runbook(runbook_id, request.values)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Runbook not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/context/bundle")
+async def context_bundle(request: ContextBundleRequest):
+    try:
+        return build_context_bundle(
+            paths=request.paths,
+            query=request.query,
+            search_limit=request.search_limit,
+            max_chars=request.max_chars,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

@@ -286,6 +286,12 @@
       gap: 6px;
     }
 
+    .workspace-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+    }
+
     .workspace-input {
       min-width: 0;
       flex: 1;
@@ -311,6 +317,7 @@
     }
 
     .workspace-btn:hover { border-color: #60a5fa; color: #fff; }
+    .workspace-btn.primary { background: #1d4ed8; border-color: #2563eb; color: #fff; }
 
     .workspace-list {
       display: flex;
@@ -539,6 +546,10 @@
       <div class="workspace-empty">Loading files...</div>
     </div>
     <pre class="workspace-preview" id="workspace-preview">Select a file to preview.</pre>
+    <div class="workspace-actions">
+      <button class="workspace-btn" id="context-file-btn" type="button">Attach file</button>
+      <button class="workspace-btn primary" id="context-search-btn" type="button">Attach search</button>
+    </div>
     <div class="status-summary">
       <div class="count" id="online-count">-</div>
       <div class="label">online</div>
@@ -569,6 +580,8 @@
     const workspaceList = document.getElementById('workspace-list');
     const workspacePreview = document.getElementById('workspace-preview');
     const workspaceSearchBtn = document.getElementById('workspace-search-btn');
+    const contextFileBtn = document.getElementById('context-file-btn');
+    const contextSearchBtn = document.getElementById('context-search-btn');
     const runbookSelect = document.getElementById('runbook-select');
     const runbookDescription = document.getElementById('runbook-description');
     const runbookFields = document.getElementById('runbook-fields');
@@ -579,6 +592,7 @@
     const AGENT_NAMES = ['code', 'db', 'devops', 'docs', 'system', 'docker'];
     let runbooks = [];
     let selectedRunbook = null;
+    let selectedWorkspacePath = null;
     let agentStatuses = {};
     let activeAgentNames = new Set();
     let activeSince = 0;
@@ -798,6 +812,7 @@
     }
 
     async function openWorkspaceFile(path) {
+      selectedWorkspacePath = path;
       workspacePreview.textContent = 'Loading...';
       try {
         const resp = await fetch(`/workspace/file?path=${encodeURIComponent(path)}`);
@@ -808,6 +823,46 @@
       } catch (err) {
         workspacePreview.textContent = err.message;
       }
+    }
+
+    function appendToInput(text) {
+      const existing = input.value.trim();
+      input.value = existing ? `${existing}\n\n${text}` : text;
+      input.dispatchEvent(new Event('input'));
+      input.focus();
+    }
+
+    async function appendContextBundle(payload) {
+      try {
+        const resp = await fetch('/context/bundle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || 'context bundle failed');
+        appendToInput(data.prompt_context);
+        addMessage(`Attached workspace context (${data.used_chars} chars).`, 'system');
+      } catch (err) {
+        workspacePreview.textContent = err.message;
+      }
+    }
+
+    async function attachSelectedWorkspaceFile() {
+      if (!selectedWorkspacePath) {
+        workspacePreview.textContent = 'Select a file first.';
+        return;
+      }
+      await appendContextBundle({ paths: [selectedWorkspacePath], max_chars: 12000 });
+    }
+
+    async function attachWorkspaceSearch() {
+      const query = workspaceQuery.value.trim();
+      if (!query) {
+        workspacePreview.textContent = 'Enter a search query first.';
+        return;
+      }
+      await appendContextBundle({ query, search_limit: 20, max_chars: 12000 });
     }
 
     function renderRunbookFields(runbook) {
@@ -1242,6 +1297,8 @@
     runbookUseBtn.addEventListener('click', useSelectedRunbook);
     runbookRunBtn.addEventListener('click', runSelectedRunbook);
     workspaceSearchBtn.addEventListener('click', searchWorkspace);
+    contextFileBtn.addEventListener('click', attachSelectedWorkspaceFile);
+    contextSearchBtn.addEventListener('click', attachWorkspaceSearch);
     workspaceQuery.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
