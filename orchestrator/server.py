@@ -17,6 +17,7 @@ from orchestrator.policy import current_policy
 from orchestrator.routing import RoutingResult, route_request, should_use_local_system_status
 from orchestrator.run_history import RunHistoryStore
 from orchestrator.tool_registry import AGNO_MEMBER_NAMES, get_tool, tool_inventory
+from orchestrator.workspace import list_workspace_files, read_workspace_file, search_workspace
 from shared.config import settings
 
 app = FastAPI(title="AGNO Team Orchestrator")
@@ -37,6 +38,11 @@ class ChatResponse(BaseModel):
     route: dict
     events: list[dict]
     run_id: str
+
+
+class WorkspaceSearchRequest(BaseModel):
+    query: str
+    limit: int | None = None
 
 def route_agents(message: str) -> list[str]:
     return route_request(message).agents
@@ -347,6 +353,31 @@ async def tools():
         decision = policy.evaluate(get_tool(tool["id"]))
         inventory.append({**tool, "policy": decision.as_dict()})
     return {"tools": inventory}
+
+
+@app.get("/workspace/files")
+async def workspace_files(limit: int | None = None):
+    return {"files": list_workspace_files(limit)}
+
+
+@app.get("/workspace/file")
+async def workspace_file(path: str):
+    try:
+        return {"file": read_workspace_file(path)}
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/workspace/search")
+async def workspace_search(request: WorkspaceSearchRequest):
+    try:
+        return {"results": search_workspace(request.query, request.limit)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/runs")

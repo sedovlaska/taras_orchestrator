@@ -9,6 +9,7 @@ from agno.tools import tool
 from orchestrator.command_runner import run_command
 from orchestrator.policy import current_policy
 from orchestrator.tool_registry import AGNO_MEMBER_NAMES
+from orchestrator.workspace import list_workspace_files, read_workspace_file, search_workspace
 from shared.config import settings
 
 LANGUAGE_INSTRUCTION = "Reply in the same language as the user. If the user writes in Russian, reply in Russian."
@@ -41,10 +42,36 @@ def create_code_agent() -> Agent:
         current_policy().require("code.generate_code")
         return f"Generated code for: {description}"
 
+    @tool
+    def list_files(limit: int = 80) -> str:
+        """List project-scoped workspace files."""
+        current_policy().require("code.list_workspace_files")
+        files = list_workspace_files(limit)
+        return "\n".join(file["path"] for file in files) or "No workspace files found."
+
+    @tool
+    def read_file(path: str) -> str:
+        """Read one project-scoped text file."""
+        current_policy().require("code.read_workspace_file")
+        file = read_workspace_file(path)
+        suffix = "\n[truncated]" if file["truncated"] else ""
+        return f"{file['path']} ({file['size_bytes']} bytes)\n\n{file['content']}{suffix}"
+
+    @tool
+    def search_files(query: str, limit: int = 50) -> str:
+        """Search project-scoped workspace text files."""
+        current_policy().require("code.search_workspace")
+        results = search_workspace(query, limit)
+        if not results:
+            return "No workspace matches found."
+        return "\n".join(
+            f"{result['path']}:{result['line']}: {result['preview']}" for result in results
+        )
+
     return Agent(
         name="code",
         model=get_model(),
-        tools=[analyze_code, lint_code, generate_code],
+        tools=[analyze_code, lint_code, generate_code, list_files, read_file, search_files],
         instructions=[
             "You are a code analysis and generation agent.",
             "Use tools to analyze, lint, or generate code.",

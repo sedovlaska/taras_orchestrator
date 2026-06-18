@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 
 from .policy import ToolPolicy, current_policy
-from .tool_registry import AGNO_MEMBER_NAMES, ToolSpec, tools_for_agent
+from .tool_registry import AGNO_MEMBER_NAMES, ToolSpec, get_tool, tools_for_agent
 
 
 SYSTEM_KEYWORDS = (
@@ -19,7 +19,20 @@ SYSTEM_KEYWORDS = (
 
 ROUTE_KEYWORDS = {
     "docs": ("doc", "docs", "readme", "documentation", "докумен", "ридми"),
-    "code": ("code", "lint", "refactor", "review", "код", "рефакт", "линт"),
+    "code": (
+        "code",
+        "lint",
+        "refactor",
+        "review",
+        "workspace",
+        "file",
+        "search",
+        "код",
+        "рефакт",
+        "линт",
+        "файл",
+        "поиск",
+    ),
     "devops": ("test", "build", "ci", "deploy", "тест", "сбор"),
     "system": SYSTEM_KEYWORDS,
     "docker": ("docker", "container", "image", "контейнер"),
@@ -76,6 +89,34 @@ def _keyword_matches(message: str) -> list[RouteMatch]:
     return matches
 
 
+def _code_tools_for_message(message: str) -> list[ToolSpec]:
+    lowered = message.lower()
+    if any(keyword in lowered for keyword in ("lint", "линт")):
+        return [get_tool("code.lint_code")]
+    if any(
+        keyword in lowered
+        for keyword in ("workspace", "file", "search", "read file", "файл", "поиск")
+    ):
+        return [
+            get_tool("code.list_workspace_files"),
+            get_tool("code.read_workspace_file"),
+            get_tool("code.search_workspace"),
+        ]
+    if any(keyword in lowered for keyword in ("generate", "draft", "создай", "сгенер")):
+        return [get_tool("code.generate_code")]
+    return tools_for_agent("code")
+
+
+def _required_tools_for_agents(agents: list[str], message: str) -> list[ToolSpec]:
+    required_tools = []
+    for agent in agents:
+        if agent == "code":
+            required_tools.extend(_code_tools_for_message(message))
+        else:
+            required_tools.extend(tools_for_agent(agent))
+    return required_tools
+
+
 def route_request(message: str, policy: ToolPolicy | None = None) -> RoutingResult:
     policy = policy or current_policy()
     matches = _keyword_matches(message)
@@ -92,8 +133,7 @@ def route_request(message: str, policy: ToolPolicy | None = None) -> RoutingResu
         for agent in AGNO_MEMBER_NAMES:
             required_tools.extend(tools_for_agent(agent))
     else:
-        for agent in agents:
-            required_tools.extend(tools_for_agent(agent))
+        required_tools.extend(_required_tools_for_agents(agents, message))
 
     return RoutingResult(
         agents=agents,

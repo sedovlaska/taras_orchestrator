@@ -19,6 +19,7 @@ def test_settings_defaults():
     assert settings.orchestrator_port == 8000
     assert settings.tool_policy_mode == "safe"
     assert settings.run_history_db_path.endswith(".sqlite3")
+    assert settings.workspace_max_file_chars > 0
 
 
 def test_stream_event_sse():
@@ -39,6 +40,7 @@ def test_server_sse_helper_outputs_json():
 
 def test_tool_registry_exposes_typed_metadata():
     lint = get_tool("code.lint_code")
+    search = get_tool("code.search_workspace")
 
     assert lint.agent == "code"
     assert lint.risk == ToolRisk.MEDIUM
@@ -46,6 +48,8 @@ def test_tool_registry_exposes_typed_metadata():
     assert lint.touches_processes is True
     assert lint.timeout_seconds == 30
     assert lint in tools_for_agent("code")
+    assert search.risk == ToolRisk.LOW
+    assert search.touches_filesystem is True
 
 
 def test_policy_defaults_allow_medium_and_deny_explicit_tools():
@@ -108,10 +112,85 @@ def test_route_request_returns_structured_policy_context():
     assert any(decision["tool_id"] == "docker.list_images" for decision in route.policy_decisions)
 
 
+def test_route_request_uses_read_only_workspace_tools_for_file_search():
+    route = route_request("search files for FastAPI")
+
+    assert route.agents == ["code"]
+    assert [tool.id for tool in route.required_tools] == [
+        "code.list_workspace_files",
+        "code.read_workspace_file",
+        "code.search_workspace",
+    ]
+    assert all(decision["risk"] == "low" for decision in route.policy_decisions)
+
+
 def test_server_route_agents_keeps_legacy_list_contract():
     from orchestrator.server import route_agents
 
     assert route_agents("please lint this code") == ["code"]
+
+
+def test_workspace_tools_are_project_scoped_and_truncate(tmp_path, monkeypatch):
+    import orchestrator.workspace as workspace
+
+    (tmp_path / "README.md").write_text("AGNO Team Orchestrator\nneedle\n", encoding="utf-8")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("secret", encoding="utf-8")
+    monkeypatch.setattr(workspace, "PROJECT_ROOT", tmp_path.resolve())
+    monkeypatch.setattr(settings, "workspace_file_list_limit", 20)
+    monkeypatch.setattr(settings, "workspace_max_file_bytes", 1024)
+    monkeypatch.setattr(settings, "workspace_max_file_chars", 10)
+
+    files = workspace.list_workspace_files()
+    read = workspace.read_workspace_file("README.md")
+
+    assert [file["path"] for file in files] == ["README.md"]
+    assert read["path"] == "README.md"
+    assert read["content"] == "AGNO Team "
+    assert read["truncated"] is True
+    with pytest.raises(PermissionError):
+        workspace.read_workspace_file("../outside.txt")
+
+
+def test_workspace_search_skips_binary_files(tmp_path, monkeypatch):
+    import orchestrator.workspace as workspace
+
+    (tmp_path / "notes.txt").write_text("first line\nneedle match\n", encoding="utf-8")
+    (tmp_path / "blob.bin").write_bytes(b"needle\0binary")
+    monkeypatch.setattr(workspace, "PROJECT_ROOT", tmp_path.resolve())
+    monkeypatch.setattr(settings, "workspace_max_file_bytes", 1024)
+    monkeypatch.setattr(settings, "workspace_max_search_results", 20)
+
+    files = workspace.list_workspace_files()
+    results = workspace.search_workspace("needle")
+
+    assert [file["path"] for file in files] == ["notes.txt"]
+    assert results == [{"path": "notes.txt", "line": 2, "preview": "needle match"}]
+    with pytest.raises(ValueError):
+        workspace.read_workspace_file("blob.bin")
+
+
+def test_workspace_api_lists_reads_and_searches(tmp_path, monkeypatch):
+    import orchestrator.server as server
+    import orchestrator.workspace as workspace
+
+    (tmp_path / "README.md").write_text("FastAPI workspace endpoint\n", encoding="utf-8")
+    monkeypatch.setattr(workspace, "PROJECT_ROOT", tmp_path.resolve())
+    monkeypatch.setattr(settings, "workspace_file_list_limit", 20)
+    monkeypatch.setattr(settings, "workspace_max_file_bytes", 1024)
+    monkeypatch.setattr(settings, "workspace_max_file_chars", 100)
+    monkeypatch.setattr(settings, "workspace_max_search_results", 20)
+    client = TestClient(server.app)
+
+    files = client.get("/workspace/files").json()["files"]
+    read = client.get("/workspace/file", params={"path": "README.md"}).json()["file"]
+    search = client.post("/workspace/search", json={"query": "workspace"}).json()["results"]
+    escape = client.get("/workspace/file", params={"path": "../outside.txt"})
+
+    assert files[0]["path"] == "README.md"
+    assert read["content"] == "FastAPI workspace endpoint\n"
+    assert search[0]["path"] == "README.md"
+    assert escape.status_code == 403
 
 
 def test_run_history_store_persists_runs_and_events(tmp_path):
