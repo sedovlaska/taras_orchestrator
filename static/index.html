@@ -260,6 +260,44 @@
       white-space: nowrap;
     }
 
+    .diagnostics-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 180px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+
+    .diagnostic-item {
+      border: 1px solid #292943;
+      background: #101016;
+      border-radius: 8px;
+      padding: 7px 8px;
+    }
+
+    .diagnostic-item.ok { border-color: #14532d; }
+    .diagnostic-item.warn { border-color: #854d0e; }
+    .diagnostic-item.error { border-color: #7f1d1d; }
+
+    .diagnostic-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      color: #f5f5f5;
+      font-size: 12px;
+      font-weight: 650;
+      line-height: 1.25;
+    }
+
+    .diagnostic-detail {
+      color: #8a8a9a;
+      font-size: 10px;
+      line-height: 1.35;
+      margin-top: 3px;
+      word-break: break-word;
+    }
+
     .runbook-select,
     .runbook-field,
     .runbook-textarea {
@@ -647,6 +685,17 @@
     <div class="analytics-list" id="analytics-list">
       <div class="workspace-empty">No analytics yet.</div>
     </div>
+    <h2>Diagnostics</h2>
+    <div class="analytics-grid">
+      <div class="metric-box">
+        <div class="metric-value" id="diagnostics-status">-</div>
+        <div class="metric-label">status</div>
+      </div>
+      <button class="workspace-btn" id="diagnostics-refresh-btn" type="button">Check</button>
+    </div>
+    <div class="diagnostics-list" id="diagnostics-list">
+      <div class="workspace-empty">Diagnostics not loaded.</div>
+    </div>
     <h2>Workspace</h2>
     <div class="workspace-controls">
       <input class="workspace-input" id="workspace-query" type="search" placeholder="Search files">
@@ -697,6 +746,9 @@
     const metricTotalRuns = document.getElementById('metric-total-runs');
     const metricErrorRuns = document.getElementById('metric-error-runs');
     const analyticsList = document.getElementById('analytics-list');
+    const diagnosticsStatus = document.getElementById('diagnostics-status');
+    const diagnosticsList = document.getElementById('diagnostics-list');
+    const diagnosticsRefreshBtn = document.getElementById('diagnostics-refresh-btn');
     const workspaceQuery = document.getElementById('workspace-query');
     const workspaceList = document.getElementById('workspace-list');
     const workspacePreview = document.getElementById('workspace-preview');
@@ -882,6 +934,35 @@
         analyticsList.innerHTML = html || '<div class="workspace-empty">No analytics yet.</div>';
       } catch (err) {
         analyticsList.innerHTML = '<div class="workspace-empty">Analytics unavailable.</div>';
+      }
+    }
+
+    function renderDiagnostics(diagnostics) {
+      diagnosticsStatus.textContent = diagnostics.status || '-';
+      diagnosticsStatus.style.color = diagnostics.status === 'ok' ? '#4ade80' : (diagnostics.status === 'warn' ? '#fbbf24' : '#f87171');
+      const checks = diagnostics.checks || [];
+      diagnosticsList.innerHTML = checks.map(check => `
+        <div class="diagnostic-item ${escapeHtml(check.status)}">
+          <div class="diagnostic-title">
+            <span>${escapeHtml(check.title)}</span>
+            <strong>${escapeHtml(check.status)}</strong>
+          </div>
+          <div class="diagnostic-detail">${escapeHtml(check.detail)}</div>
+        </div>
+      `).join('') || '<div class="workspace-empty">Diagnostics unavailable.</div>';
+    }
+
+    async function refreshDiagnostics() {
+      try {
+        diagnosticsList.innerHTML = '<div class="workspace-empty">Checking...</div>';
+        const resp = await fetch('/diagnostics');
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || 'diagnostics failed');
+        renderDiagnostics(data.diagnostics || {});
+      } catch (err) {
+        diagnosticsStatus.textContent = 'error';
+        diagnosticsStatus.style.color = '#f87171';
+        diagnosticsList.innerHTML = `<div class="workspace-empty">${escapeHtml(err.message)}</div>`;
       }
     }
 
@@ -1553,6 +1634,7 @@
     contextFileBtn.addEventListener('click', attachSelectedWorkspaceFile);
     contextSearchBtn.addEventListener('click', attachWorkspaceSearch);
     contextPackSaveBtn.addEventListener('click', saveContextPack);
+    diagnosticsRefreshBtn.addEventListener('click', refreshDiagnostics);
     workspaceQuery.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
@@ -1573,6 +1655,7 @@
     refreshAgents();
     refreshRuns();
     refreshAnalytics();
+    refreshDiagnostics();
     loadWorkspaceFiles();
     loadRunbooks();
     loadContextPacks();
