@@ -28,9 +28,100 @@ body {
   min-height: 0;
 }
 
+.message-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: min(820px, 92%);
+}
+
 .message {
   max-width: min(820px, 92%);
   white-space: pre-wrap;
+}
+
+.message-row .message {
+  max-width: 100%;
+}
+
+/* Live runner / governance timeline pinned above the assistant turn */
+.runner-timeline {
+  background: color-mix(in srgb, var(--mantine-color-dark-6) 70%, transparent);
+  overflow: hidden;
+}
+
+.runner-timeline.is-running {
+  border-color: color-mix(in srgb, var(--mantine-color-blue-6) 45%, var(--mantine-color-dark-4));
+}
+
+/* Once the run settles the trace recedes: it's an audit artifact, not the
+   focus. Quieter surface, standard border. */
+.runner-timeline.is-settled {
+  background: color-mix(in srgb, var(--mantine-color-dark-6) 45%, transparent);
+}
+
+.runner-timeline-head {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+}
+
+.runner-timeline-head:hover {
+  background: color-mix(in srgb, var(--mantine-color-dark-5) 50%, transparent);
+}
+
+.runner-timeline-chevron {
+  color: var(--mantine-color-dark-2);
+  transition: transform 160ms ease-out;
+  flex: none;
+}
+
+.runner-timeline-rail {
+  border-top: 1px solid var(--mantine-color-dark-4);
+}
+
+.runner-step-marker {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  align-self: stretch;
+}
+
+/* Vertical connector between consecutive step markers */
+.runner-step-line {
+  flex: 1;
+  width: 2px;
+  margin-top: 2px;
+  background: var(--mantine-color-dark-4);
+  min-height: 8px;
+}
+
+.runner-step.is-pending .runner-step-marker .runner-step-line {
+  background: color-mix(in srgb, var(--mantine-color-blue-6) 60%, var(--mantine-color-dark-4));
+}
+
+.runner-step-pulse {
+  animation: runner-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes runner-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--mantine-color-blue-5) 55%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--mantine-color-blue-5) 0%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .runner-step-pulse {
+    animation: none;
+  }
+  .runner-timeline-chevron {
+    transition: none;
+  }
 }
 
 .message-assistant {
