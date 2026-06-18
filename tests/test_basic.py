@@ -743,6 +743,134 @@ def test_agno_agents_import_with_model_dependencies():
     assert callable(create_orchestrator)
 
 
+def test_get_model_returns_ollama_for_ollama_provider(monkeypatch):
+    from agno.models.ollama import Ollama
+    from orchestrator.agno_agents import get_model
+
+    monkeypatch.setattr(settings, "llm_provider", "ollama")
+    monkeypatch.setattr(settings, "llm_model", "qwen3:1.7b")
+
+    model = get_model()
+    assert isinstance(model, Ollama)
+    assert model.id == "qwen3:1.7b"
+    # Per-request override still applies on the Ollama path.
+    assert get_model("llama3:8b").id == "llama3:8b"
+
+
+def test_get_model_returns_openai_compatible_for_openai_provider(monkeypatch):
+    from agno.models.openai import OpenAILike
+    from orchestrator.agno_agents import get_model
+
+    monkeypatch.setattr(settings, "llm_provider", "openai")
+    monkeypatch.setattr(settings, "llm_model", "openai/gpt-4o-mini")
+    monkeypatch.setattr(settings, "openai_base_url", "https://openrouter.ai/api/v1")
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test")
+
+    model = get_model()
+    assert isinstance(model, OpenAILike)
+    assert model.id == "openai/gpt-4o-mini"
+    assert model.base_url == "https://openrouter.ai/api/v1"
+    assert model.api_key == "sk-test"
+    # Per-request override still applies on the OpenAI path.
+    assert get_model("anthropic/claude-3.5-sonnet").id == "anthropic/claude-3.5-sonnet"
+
+
+def test_health_reports_active_provider(monkeypatch):
+    import orchestrator.server as server
+
+    monkeypatch.setattr(settings, "llm_provider", "openai")
+    client = TestClient(server.app)
+
+    payload = client.get("/health").json()
+
+    assert payload["provider"] == "openai"
+    assert payload["model"] == settings.llm_model
+
+
+def test_models_api_returns_configured_model_for_openai_without_ollama(monkeypatch):
+    import orchestrator.server as server
+
+    monkeypatch.setattr(settings, "llm_provider", "openai")
+    monkeypatch.setattr(settings, "llm_model", "openai/gpt-4o-mini")
+    monkeypatch.setattr(settings, "openai_base_url", "https://openrouter.ai/api/v1")
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test")
+
+    # Fail loudly if the openai path ever reaches out to Ollama.
+    def boom(*args, **kwargs):
+        raise AssertionError("Ollama /api/tags must not be called for openai provider")
+
+    monkeypatch.setattr(server.urllib.request, "build_opener", boom)
+    client = TestClient(server.app)
+
+    payload = client.get("/models").json()
+
+    assert payload["reachable"] is True
+    assert payload["models"] == ["openai/gpt-4o-mini"]
+    assert payload["default_model"] == "openai/gpt-4o-mini"
+
+
+def test_models_api_openai_unreachable_without_credentials(monkeypatch):
+    import orchestrator.server as server
+
+    monkeypatch.setattr(settings, "llm_provider", "openai")
+    monkeypatch.setattr(settings, "openai_base_url", "")
+    monkeypatch.setattr(settings, "openai_api_key", "")
+    client = TestClient(server.app)
+
+    payload = client.get("/models").json()
+
+    assert payload["reachable"] is False
+
+
+def test_diagnostics_openai_provider_is_ok_with_credentials(tmp_path, monkeypatch):
+    import orchestrator.diagnostics as diagnostics
+    from orchestrator.context_packs import ContextPackStore
+
+    monkeypatch.setattr(settings, "llm_provider", "openai")
+    monkeypatch.setattr(settings, "llm_model", "openai/gpt-4o-mini")
+    monkeypatch.setattr(settings, "openai_base_url", "https://openrouter.ai/api/v1")
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test")
+
+    def boom():
+        raise AssertionError("Ollama must not be queried for openai provider")
+
+    report = diagnostics.build_diagnostics(
+        run_history=RunHistoryStore(tmp_path / "runs.sqlite3"),
+        context_packs=ContextPackStore(tmp_path / "packs.sqlite3"),
+        model_lister=boom,
+    )
+
+    runtime = next(c for c in report["checks"] if c["id"] == "ollama_runtime")
+    model = next(c for c in report["checks"] if c["id"] == "model")
+    assert runtime["status"] == "ok"
+    assert model["status"] == "ok"
+    assert report["counts"]["error"] == 0
+
+
+def test_run_orchestrator_skips_ollama_fallbacks_for_openai_provider(monkeypatch):
+    import orchestrator.server as server
+
+    monkeypatch.setattr(settings, "llm_provider", "openai")
+
+    def fail_agno(*args, **kwargs):
+        raise RuntimeError("agno boom")
+
+    def fail_ollama(*args, **kwargs):
+        raise AssertionError("Ollama fallback runners must not run for openai provider")
+
+    monkeypatch.setattr(server, "ask_agno_team", fail_agno)
+    monkeypatch.setattr(server, "ask_ollama_direct", fail_ollama)
+    monkeypatch.setattr(server, "ask_ollama_cli", fail_ollama)
+
+    events: list[dict] = []
+    answer = server.run_orchestrator("write some docs about python", ["docs"], events)
+
+    # Only AGNO Team and Local system runners were attempted (no Ollama labels).
+    started = [e["data"]["runner"] for e in events if e["event"] == "runner_start"]
+    assert started == ["AGNO Team", "Local system"]
+    assert "agno boom" in answer
+
+
 def test_models_api_parses_ollama_tags(monkeypatch):
     import orchestrator.server as server
 

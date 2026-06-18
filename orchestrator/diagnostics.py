@@ -101,6 +101,17 @@ def _store_check(check_id: str, title: str, path: Path) -> DiagnosticCheck:
 def _model_config_check() -> DiagnosticCheck:
     if not settings.llm_model.strip():
         return DiagnosticCheck("model", "error", "Model config", "LLM_MODEL is empty.")
+    if settings.llm_provider == "openai":
+        if not settings.openai_base_url.startswith(("http://", "https://")):
+            return DiagnosticCheck(
+                "model", "warn", "Model config", "OPENAI_BASE_URL should be an HTTP URL."
+            )
+        return DiagnosticCheck(
+            "model",
+            "ok",
+            "Model config",
+            f"{settings.llm_model} via OpenAI-compatible endpoint {settings.openai_base_url}.",
+        )
     if not settings.ollama_host.startswith(("http://", "https://")):
         return DiagnosticCheck("model", "warn", "Model config", "OLLAMA_HOST should be an HTTP URL.")
     return DiagnosticCheck(
@@ -114,8 +125,26 @@ def _model_config_check() -> DiagnosticCheck:
 def _ollama_runtime_check(model_lister: Callable[[], dict] = list_ollama_models) -> DiagnosticCheck:
     """Actively query Ollama's tags to confirm it is reachable and the model is pulled.
 
-    Uses the short-timeout helper so this never hangs when Ollama is down.
+    Uses the short-timeout helper so this never hangs when Ollama is down. When
+    the active provider is OpenAI-compatible this skips the Ollama reachability
+    assertion entirely and instead sanity-checks that the base URL and API key
+    are configured.
     """
+    if settings.llm_provider == "openai":
+        if not (settings.openai_base_url and settings.openai_api_key):
+            return DiagnosticCheck(
+                "ollama_runtime",
+                "warn",
+                "Model runtime",
+                "OpenAI-compatible provider selected but OPENAI_BASE_URL / OPENAI_API_KEY "
+                "are not both set.",
+            )
+        return DiagnosticCheck(
+            "ollama_runtime",
+            "ok",
+            "Model runtime",
+            "OpenAI-compatible provider configured; Ollama runtime check skipped.",
+        )
     try:
         result = model_lister()
     except Exception as exc:  # pragma: no cover - helper degrades gracefully itself

@@ -247,12 +247,22 @@ def system_status(events: list[RunEvent] | None = None) -> str:
 
 
 def _ollama_env_overrides() -> dict[str, str]:
-    return {
+    env = {
         "NO_PROXY": "localhost,127.0.0.1,::1",
         "no_proxy": "localhost,127.0.0.1,::1",
         "OLLAMA_HOST": settings.ollama_host,
         "PYTHONIOENCODING": "utf-8",
+        # The AGNO Team runs in a subprocess; the child re-loads settings from env,
+        # so the provider selection must be passed through explicitly.
+        "LLM_PROVIDER": settings.llm_provider,
+        "LLM_MODEL": settings.llm_model,
     }
+    if settings.llm_provider == "openai":
+        # Thread the OpenAI-compatible credentials to the child. The api key is
+        # never logged (run_command does not echo env values).
+        env["OPENAI_BASE_URL"] = settings.openai_base_url
+        env["OPENAI_API_KEY"] = settings.openai_api_key
+    return env
 
 
 def _record_gated_tools(stdout: str, events: list[RunEvent] | None) -> None:
@@ -415,7 +425,7 @@ def run_orchestrator(
 ) -> str:
     errors = []
     agents = route.agents if isinstance(route, RoutingResult) else route
-    for label, runner in (
+    runners = [
         ("AGNO Team", lambda: ask_agno_team(message, agents, model, granted_tools, events)),
         (
             "Local system",
@@ -423,9 +433,14 @@ def run_orchestrator(
             if should_use_local_system_status(message)
             else _skip_non_system(),
         ),
-        ("Ollama direct", lambda: ask_ollama_direct(message, model)),
-        ("Ollama CLI", lambda: ask_ollama_cli(message, model)),
-    ):
+    ]
+    # The direct/CLI fallbacks are Ollama-specific; they are irrelevant (and
+    # would fail) when running against an OpenAI-compatible provider, where the
+    # AGNO Team path is the one that works.
+    if settings.llm_provider != "openai":
+        runners.append(("Ollama direct", lambda: ask_ollama_direct(message, model)))
+        runners.append(("Ollama CLI", lambda: ask_ollama_cli(message, model)))
+    for label, runner in runners:
         if events is not None:
             events.append({"event": "runner_start", "data": {"runner": label}})
         try:
@@ -457,6 +472,7 @@ async def health():
     return {
         "status": "ok",
         "framework": "agno",
+        "provider": settings.llm_provider,
         "model": settings.llm_model,
         "ollama_host": settings.ollama_host,
         "members": AGNO_MEMBER_NAMES,
