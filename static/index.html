@@ -292,6 +292,12 @@
       gap: 6px;
     }
 
+    .context-pack-form {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 6px;
+    }
+
     .workspace-input {
       min-width: 0;
       flex: 1;
@@ -318,6 +324,45 @@
 
     .workspace-btn:hover { border-color: #60a5fa; color: #fff; }
     .workspace-btn.primary { background: #1d4ed8; border-color: #2563eb; color: #fff; }
+
+    .context-pack-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-height: 42px;
+      max-height: 150px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+
+    .context-pack-item {
+      border: 1px solid #292943;
+      background: #101016;
+      border-radius: 8px;
+      padding: 7px 8px;
+    }
+
+    .context-pack-title {
+      color: #f5f5f5;
+      font-size: 12px;
+      font-weight: 650;
+      line-height: 1.25;
+      word-break: break-word;
+    }
+
+    .context-pack-meta {
+      color: #8a8a9a;
+      font-size: 10px;
+      line-height: 1.35;
+      margin-top: 3px;
+      word-break: break-word;
+    }
+
+    .context-pack-actions {
+      display: flex;
+      gap: 6px;
+      margin-top: 6px;
+    }
 
     .workspace-list {
       display: flex;
@@ -550,6 +595,14 @@
       <button class="workspace-btn" id="context-file-btn" type="button">Attach file</button>
       <button class="workspace-btn primary" id="context-search-btn" type="button">Attach search</button>
     </div>
+    <h2>Context Packs</h2>
+    <div class="context-pack-form">
+      <input class="workspace-input" id="context-pack-name" type="text" placeholder="Pack name">
+      <button class="workspace-btn" id="context-pack-save-btn" type="button">Save</button>
+    </div>
+    <div class="context-pack-list" id="context-pack-list">
+      <div class="workspace-empty">No saved context packs.</div>
+    </div>
     <div class="status-summary">
       <div class="count" id="online-count">-</div>
       <div class="label">online</div>
@@ -582,6 +635,9 @@
     const workspaceSearchBtn = document.getElementById('workspace-search-btn');
     const contextFileBtn = document.getElementById('context-file-btn');
     const contextSearchBtn = document.getElementById('context-search-btn');
+    const contextPackName = document.getElementById('context-pack-name');
+    const contextPackSaveBtn = document.getElementById('context-pack-save-btn');
+    const contextPackList = document.getElementById('context-pack-list');
     const runbookSelect = document.getElementById('runbook-select');
     const runbookDescription = document.getElementById('runbook-description');
     const runbookFields = document.getElementById('runbook-fields');
@@ -863,6 +919,104 @@
         return;
       }
       await appendContextBundle({ query, search_limit: 20, max_chars: 12000 });
+    }
+
+    function currentContextPackPayload() {
+      const query = workspaceQuery.value.trim();
+      const paths = selectedWorkspacePath ? [selectedWorkspacePath] : [];
+      return {
+        name: contextPackName.value.trim(),
+        description: query ? `Search: ${query}` : (selectedWorkspacePath ? `File: ${selectedWorkspacePath}` : ''),
+        paths,
+        query: query || null,
+        search_limit: 20,
+        max_chars: 12000,
+      };
+    }
+
+    async function saveContextPack() {
+      const payload = currentContextPackPayload();
+      if (!payload.name) {
+        workspacePreview.textContent = 'Enter a context pack name.';
+        return;
+      }
+      if (!payload.paths.length && !payload.query) {
+        workspacePreview.textContent = 'Select a file or enter a search query first.';
+        return;
+      }
+      try {
+        const resp = await fetch('/context/packs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || 'save failed');
+        contextPackName.value = '';
+        workspacePreview.textContent = `Saved context pack: ${data.pack.name}`;
+        loadContextPacks();
+      } catch (err) {
+        workspacePreview.textContent = err.message;
+      }
+    }
+
+    function renderContextPacks(packs) {
+      contextPackList.innerHTML = '';
+      if (!packs.length) {
+        contextPackList.innerHTML = '<div class="workspace-empty">No saved context packs.</div>';
+        return;
+      }
+      packs.forEach(pack => {
+        const div = document.createElement('div');
+        div.className = 'context-pack-item';
+        const bits = [];
+        if ((pack.paths || []).length) bits.push((pack.paths || []).join(', '));
+        if (pack.query) bits.push(`search: ${pack.query}`);
+        div.innerHTML = `
+          <div class="context-pack-title">${escapeHtml(pack.name)}</div>
+          <div class="context-pack-meta">${escapeHtml(bits.join(' · ') || 'empty')}</div>
+          <div class="context-pack-actions">
+            <button class="workspace-btn" type="button" data-action="apply">Apply</button>
+            <button class="workspace-btn" type="button" data-action="delete">Delete</button>
+          </div>
+        `;
+        div.querySelector('[data-action="apply"]').addEventListener('click', () => applyContextPack(pack.id));
+        div.querySelector('[data-action="delete"]').addEventListener('click', () => deleteContextPack(pack.id));
+        contextPackList.appendChild(div);
+      });
+    }
+
+    async function loadContextPacks() {
+      try {
+        const resp = await fetch('/context/packs?limit=20');
+        const data = await resp.json();
+        renderContextPacks(data.packs || []);
+      } catch (err) {
+        contextPackList.innerHTML = '<div class="workspace-empty">Context packs unavailable.</div>';
+      }
+    }
+
+    async function applyContextPack(packId) {
+      try {
+        const resp = await fetch(`/context/packs/${encodeURIComponent(packId)}/bundle`, { method: 'POST' });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || 'context pack failed');
+        appendToInput(data.bundle.prompt_context);
+        addMessage(`Attached context pack: ${data.pack.name}.`, 'system');
+      } catch (err) {
+        workspacePreview.textContent = err.message;
+      }
+    }
+
+    async function deleteContextPack(packId) {
+      try {
+        const resp = await fetch(`/context/packs/${encodeURIComponent(packId)}`, { method: 'DELETE' });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || 'delete failed');
+        loadContextPacks();
+      } catch (err) {
+        workspacePreview.textContent = err.message;
+      }
     }
 
     function renderRunbookFields(runbook) {
@@ -1299,6 +1453,7 @@
     workspaceSearchBtn.addEventListener('click', searchWorkspace);
     contextFileBtn.addEventListener('click', attachSelectedWorkspaceFile);
     contextSearchBtn.addEventListener('click', attachWorkspaceSearch);
+    contextPackSaveBtn.addEventListener('click', saveContextPack);
     workspaceQuery.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
@@ -1320,6 +1475,7 @@
     refreshRuns();
     loadWorkspaceFiles();
     loadRunbooks();
+    loadContextPacks();
     setInterval(refreshAgents, 30000);
     setInterval(refreshRuns, 30000);
   </script>

@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from orchestrator.command_runner import run_command
 from orchestrator.context_bundles import build_context_bundle
+from orchestrator.context_packs import ContextPackStore
 from orchestrator.policy import current_policy
 from orchestrator.routing import RoutingResult, route_request, should_use_local_system_status
 from orchestrator.runbooks import get_runbook, list_runbooks, render_runbook
@@ -29,6 +30,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 
 RunEvent = dict[str, object]
 run_history = RunHistoryStore.from_settings()
+context_pack_store = ContextPackStore.from_settings()
 
 class ChatRequest(BaseModel):
     message: str
@@ -52,6 +54,15 @@ class RunbookRenderRequest(BaseModel):
 
 
 class ContextBundleRequest(BaseModel):
+    paths: list[str] = Field(default_factory=list)
+    query: str | None = None
+    search_limit: int = 20
+    max_chars: int | None = None
+
+
+class ContextPackRequest(BaseModel):
+    name: str
+    description: str = ""
     paths: list[str] = Field(default_factory=list)
     query: str | None = None
     search_limit: int = 20
@@ -428,6 +439,70 @@ async def context_bundle(request: ContextBundleRequest):
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/context/packs")
+async def context_packs(limit: int = 50):
+    return {"packs": context_pack_store.list_packs(limit)}
+
+
+@app.post("/context/packs")
+async def create_context_pack(request: ContextPackRequest):
+    try:
+        return {
+            "pack": context_pack_store.create_pack(
+                name=request.name,
+                description=request.description,
+                paths=request.paths,
+                query=request.query,
+                search_limit=request.search_limit,
+                max_chars=request.max_chars,
+            )
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/context/packs/{pack_id}")
+async def context_pack_detail(pack_id: str):
+    pack = context_pack_store.get_pack(pack_id)
+    if pack is None:
+        raise HTTPException(status_code=404, detail="Context pack not found")
+    return {"pack": pack}
+
+
+@app.put("/context/packs/{pack_id}")
+async def update_context_pack(pack_id: str, request: ContextPackRequest):
+    try:
+        pack = context_pack_store.update_pack(
+            pack_id,
+            name=request.name,
+            description=request.description,
+            paths=request.paths,
+            query=request.query,
+            search_limit=request.search_limit,
+            max_chars=request.max_chars,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if pack is None:
+        raise HTTPException(status_code=404, detail="Context pack not found")
+    return {"pack": pack}
+
+
+@app.post("/context/packs/{pack_id}/bundle")
+async def context_pack_bundle(pack_id: str):
+    result = context_pack_store.build_bundle(pack_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Context pack not found")
+    return result
+
+
+@app.delete("/context/packs/{pack_id}")
+async def delete_context_pack(pack_id: str):
+    if not context_pack_store.delete_pack(pack_id):
+        raise HTTPException(status_code=404, detail="Context pack not found")
+    return {"deleted": True}
 
 
 @app.get("/runs")
