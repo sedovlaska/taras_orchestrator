@@ -10,11 +10,12 @@ from pathlib import Path
 import psutil
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from orchestrator.command_runner import run_command
 from orchestrator.policy import current_policy
 from orchestrator.routing import RoutingResult, route_request, should_use_local_system_status
+from orchestrator.runbooks import get_runbook, list_runbooks, render_runbook
 from orchestrator.run_history import RunHistoryStore
 from orchestrator.tool_registry import AGNO_MEMBER_NAMES, get_tool, tool_inventory
 from orchestrator.workspace import list_workspace_files, read_workspace_file, search_workspace
@@ -43,6 +44,11 @@ class ChatResponse(BaseModel):
 class WorkspaceSearchRequest(BaseModel):
     query: str
     limit: int | None = None
+
+
+class RunbookRenderRequest(BaseModel):
+    values: dict[str, str] = Field(default_factory=dict)
+
 
 def route_agents(message: str) -> list[str]:
     return route_request(message).agents
@@ -376,6 +382,29 @@ async def workspace_file(path: str):
 async def workspace_search(request: WorkspaceSearchRequest):
     try:
         return {"results": search_workspace(request.query, request.limit)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/runbooks")
+async def runbooks():
+    return {"runbooks": list_runbooks()}
+
+
+@app.get("/runbooks/{runbook_id}")
+async def runbook_detail(runbook_id: str):
+    try:
+        return {"runbook": get_runbook(runbook_id).as_dict(include_template=True)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Runbook not found") from exc
+
+
+@app.post("/runbooks/{runbook_id}/render")
+async def render_runbook_prompt(runbook_id: str, request: RunbookRenderRequest):
+    try:
+        return render_runbook(runbook_id, request.values)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Runbook not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

@@ -209,6 +209,78 @@
       margin-top: 4px;
     }
 
+    .runbook-select,
+    .runbook-field,
+    .runbook-textarea {
+      width: 100%;
+      background: #0f0f0f;
+      border: 1px solid #2a2a4a;
+      border-radius: 6px;
+      color: #f5f5f5;
+      font-size: 12px;
+      padding: 7px 8px;
+      outline: none;
+      font-family: inherit;
+    }
+
+    .runbook-select:focus,
+    .runbook-field:focus,
+    .runbook-textarea:focus { border-color: #3b82f6; }
+
+    .runbook-description {
+      color: #8a8a9a;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .runbook-fields {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 240px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+
+    .runbook-label {
+      color: #d7d9e8;
+      font-size: 11px;
+      font-weight: 650;
+      line-height: 1.25;
+      margin-bottom: 4px;
+    }
+
+    .runbook-help {
+      color: #666;
+      font-size: 10px;
+      line-height: 1.3;
+      margin-top: 3px;
+    }
+
+    .runbook-textarea {
+      min-height: 72px;
+      resize: vertical;
+    }
+
+    .runbook-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+    }
+
+    .runbook-btn {
+      border: 1px solid #2a2a4a;
+      background: #101016;
+      color: #c7c9d8;
+      border-radius: 6px;
+      padding: 7px 9px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .runbook-btn:hover { border-color: #60a5fa; color: #fff; }
+    .runbook-btn.primary { background: #1d4ed8; border-color: #2563eb; color: #fff; }
+
     .workspace-controls {
       display: flex;
       gap: 6px;
@@ -440,6 +512,16 @@
   <div id="sidebar">
     <h2>Agents</h2>
     <div id="agents-list"></div>
+    <h2>Runbooks</h2>
+    <select class="runbook-select" id="runbook-select">
+      <option>Loading runbooks...</option>
+    </select>
+    <div class="runbook-description" id="runbook-description"></div>
+    <div class="runbook-fields" id="runbook-fields"></div>
+    <div class="runbook-actions">
+      <button class="runbook-btn" id="runbook-use-btn" type="button">Use</button>
+      <button class="runbook-btn primary" id="runbook-run-btn" type="button">Run</button>
+    </div>
     <h2>Timeline</h2>
     <div class="timeline" id="timeline">
       <div class="timeline-empty">Routing, policy, and tool events will appear here.</div>
@@ -487,9 +569,16 @@
     const workspaceList = document.getElementById('workspace-list');
     const workspacePreview = document.getElementById('workspace-preview');
     const workspaceSearchBtn = document.getElementById('workspace-search-btn');
+    const runbookSelect = document.getElementById('runbook-select');
+    const runbookDescription = document.getElementById('runbook-description');
+    const runbookFields = document.getElementById('runbook-fields');
+    const runbookUseBtn = document.getElementById('runbook-use-btn');
+    const runbookRunBtn = document.getElementById('runbook-run-btn');
 
     const AGENT_COLORS = { code: '#3b82f6', db: '#f97316', devops: '#ef4444', docs: '#8b5cf6', system: '#10b981', docker: '#06b6d4' };
     const AGENT_NAMES = ['code', 'db', 'devops', 'docs', 'system', 'docker'];
+    let runbooks = [];
+    let selectedRunbook = null;
     let agentStatuses = {};
     let activeAgentNames = new Set();
     let activeSince = 0;
@@ -721,6 +810,100 @@
       }
     }
 
+    function renderRunbookFields(runbook) {
+      runbookFields.innerHTML = '';
+      (runbook.variables || []).forEach(variable => {
+        const wrapper = document.createElement('div');
+        const inputId = `runbook-field-${variable.name}`;
+        const field = variable.multiline ? document.createElement('textarea') : document.createElement('input');
+        field.id = inputId;
+        field.className = variable.multiline ? 'runbook-textarea' : 'runbook-field';
+        field.dataset.runbookField = variable.name;
+        field.placeholder = variable.description || variable.label;
+        field.value = variable.default || '';
+        if (!variable.multiline) field.type = 'text';
+        wrapper.innerHTML = `
+          <label class="runbook-label" for="${escapeHtml(inputId)}">${escapeHtml(variable.label)}${variable.required ? '' : ' (optional)'}</label>
+        `;
+        wrapper.appendChild(field);
+        const help = document.createElement('div');
+        help.className = 'runbook-help';
+        help.textContent = variable.description || '';
+        wrapper.appendChild(help);
+        runbookFields.appendChild(wrapper);
+      });
+    }
+
+    function selectRunbook(runbookId) {
+      selectedRunbook = runbooks.find(runbook => runbook.id === runbookId) || null;
+      if (!selectedRunbook) {
+        runbookDescription.textContent = 'Runbooks unavailable.';
+        runbookFields.innerHTML = '';
+        return;
+      }
+      runbookDescription.textContent = `${selectedRunbook.category} · ${selectedRunbook.description}`;
+      renderRunbookFields(selectedRunbook);
+    }
+
+    function collectRunbookValues() {
+      const values = {};
+      runbookFields.querySelectorAll('[data-runbook-field]').forEach(field => {
+        values[field.dataset.runbookField] = field.value;
+      });
+      return values;
+    }
+
+    async function renderRunbookPrompt() {
+      if (!selectedRunbook) throw new Error('No runbook selected.');
+      const resp = await fetch(`/runbooks/${encodeURIComponent(selectedRunbook.id)}/render`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ values: collectRunbookValues() }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || 'runbook render failed');
+      return data.prompt;
+    }
+
+    async function useSelectedRunbook() {
+      try {
+        const prompt = await renderRunbookPrompt();
+        input.value = prompt;
+        input.dispatchEvent(new Event('input'));
+        input.focus();
+      } catch (err) {
+        runbookDescription.textContent = err.message;
+      }
+    }
+
+    async function runSelectedRunbook() {
+      try {
+        const prompt = await renderRunbookPrompt();
+        await sendMessage(prompt);
+      } catch (err) {
+        runbookDescription.textContent = err.message;
+      }
+    }
+
+    async function loadRunbooks() {
+      try {
+        const resp = await fetch('/runbooks');
+        const data = await resp.json();
+        runbooks = data.runbooks || [];
+        runbookSelect.innerHTML = '';
+        runbooks.forEach(runbook => {
+          const option = document.createElement('option');
+          option.value = runbook.id;
+          option.textContent = runbook.title;
+          runbookSelect.appendChild(option);
+        });
+        if (runbooks.length) selectRunbook(runbooks[0].id);
+      } catch (err) {
+        runbookSelect.innerHTML = '<option>Unavailable</option>';
+        runbookDescription.textContent = 'Runbooks unavailable.';
+      }
+    }
+
     function renderAgents() {
       agentsList.innerHTML = '';
       AGENT_NAMES.forEach(name => {
@@ -921,12 +1104,12 @@
 
     }
 
-    async function sendMessage() {
-      const text = input.value.trim();
+    async function sendMessage(messageOverride = null) {
+      const text = (messageOverride || input.value).trim();
       if (!text) return;
 
       addMessage(text, 'user');
-      input.value = '';
+      if (!messageOverride) input.value = '';
       setLoading(true);
       clearTimeline();
       addTypingIndicator();
@@ -1054,7 +1237,10 @@
       }
     }
 
-    sendBtn.addEventListener('click', sendMessage);
+    sendBtn.addEventListener('click', () => sendMessage());
+    runbookSelect.addEventListener('change', () => selectRunbook(runbookSelect.value));
+    runbookUseBtn.addEventListener('click', useSelectedRunbook);
+    runbookRunBtn.addEventListener('click', runSelectedRunbook);
     workspaceSearchBtn.addEventListener('click', searchWorkspace);
     workspaceQuery.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
@@ -1076,6 +1262,7 @@
     refreshAgents();
     refreshRuns();
     loadWorkspaceFiles();
+    loadRunbooks();
     setInterval(refreshAgents, 30000);
     setInterval(refreshRuns, 30000);
   </script>

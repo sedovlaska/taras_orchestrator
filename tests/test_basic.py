@@ -193,6 +193,52 @@ def test_workspace_api_lists_reads_and_searches(tmp_path, monkeypatch):
     assert escape.status_code == 403
 
 
+def test_runbook_registry_renders_defaults_and_validates_required_fields():
+    from orchestrator.runbooks import get_runbook, list_runbooks, render_runbook
+
+    runbooks = list_runbooks()
+    onboarding = render_runbook("repo_onboarding", {})
+
+    assert len(runbooks) >= 5
+    assert get_runbook("feature_plan").suggested_agent == "code"
+    assert "Onboard me to this repository" in onboarding["prompt"]
+    with pytest.raises(ValueError):
+        render_runbook("feature_plan", {})
+    with pytest.raises(KeyError):
+        get_runbook("missing")
+
+
+def test_runbook_api_lists_details_and_renders_prompt():
+    import orchestrator.server as server
+
+    client = TestClient(server.app)
+
+    listing = client.get("/runbooks").json()["runbooks"]
+    detail = client.get("/runbooks/feature_plan").json()["runbook"]
+    rendered = client.post(
+        "/runbooks/feature_plan/render",
+        json={"values": {"feature": "workspace snapshots", "files": "orchestrator/"}},
+    ).json()
+    invalid = client.post("/runbooks/feature_plan/render", json={"values": {}})
+    missing = client.get("/runbooks/not-real")
+
+    assert listing[0]["id"] == "repo_onboarding"
+    assert "{{feature}}" in detail["template"]
+    assert "workspace snapshots" in rendered["prompt"]
+    assert invalid.status_code == 422
+    assert missing.status_code == 404
+
+
+def test_index_exposes_runbook_controls():
+    import orchestrator.server as server
+
+    client = TestClient(server.app)
+    html = client.get("/").text
+
+    assert 'id="runbook-select"' in html
+    assert "loadRunbooks()" in html
+
+
 def test_run_history_store_persists_runs_and_events(tmp_path):
     store = RunHistoryStore(tmp_path / "runs.sqlite3")
     route = route_request("please lint this code").as_dict()
