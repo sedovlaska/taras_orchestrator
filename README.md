@@ -38,6 +38,10 @@ Open `http://localhost:8000`.
 - `GET /runs` returns recent chat runs from the local audit log.
 - `GET /runs/{run_id}` returns one stored run with its route metadata.
 - `GET /runs/{run_id}/events` returns the persisted event timeline for a run.
+- `GET /approvals` returns pending or historical tool approvals.
+- `POST /approvals/{approval_id}/approve` approves one pending tool approval.
+- `POST /approvals/{approval_id}/deny` denies one pending tool approval.
+- `POST /runs/{run_id}/resume` resumes a run after all required approvals are approved.
 - `POST /chat` returns a complete answer.
 - `POST /chat/stream` streams route, policy, runner, tool, and final answer events for the browser UI.
 - `GET /agents/status` returns the in-process AGNO team member status.
@@ -55,11 +59,14 @@ TOOL_POLICY_MODE=safe
 TOOL_ALLOWED_RISKS=low,medium
 TOOL_ALLOWED=
 TOOL_DENIED=system.list_processes,docker.list_containers,docker.list_images
+TOOL_APPROVAL_REQUIRED_RISKS=medium,high
+TOOL_APPROVAL_TTL_SECONDS=600
 RUN_HISTORY_DB_PATH=.data/run_history.sqlite3
 ```
 
 Set `TOOL_POLICY_MODE=off` only in a trusted local environment. You can explicitly allow or deny
-individual tools by id, for example `docker.list_images`.
+individual tools by id, for example `docker.list_images`. Allowed tools with risk levels listed in
+`TOOL_APPROVAL_REQUIRED_RISKS` are paused until approved through the local approval API or UI.
 
 ## Run History
 
