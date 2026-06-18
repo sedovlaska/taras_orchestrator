@@ -553,15 +553,16 @@ def test_chat_api_requires_approval_before_medium_risk_tools(tmp_path, monkeypat
     monkeypatch.setattr(server, "run_history", store)
     called = {"runner": False}
 
-    def fake_runner(message, route, events):
+    def fake_runner(message, route, events, model=None):
         called["runner"] = True
+        called["model"] = model
         events.append({"event": "runner_result", "data": {"runner": "fake", "status": "ok"}})
         return f"answer: {message}"
 
     monkeypatch.setattr(server, "run_orchestrator", fake_runner)
     client = TestClient(server.app)
 
-    response = client.post("/chat", json={"message": "please lint this code"})
+    response = client.post("/chat", json={"message": "please lint this code", "model": "llama3:8b"})
     payload = response.json()
     approvals = client.get("/approvals", params={"run_id": payload["run_id"]}).json()["approvals"]
     events = client.get(f"/runs/{payload['run_id']}/events").json()["events"]
@@ -570,6 +571,8 @@ def test_chat_api_requires_approval_before_medium_risk_tools(tmp_path, monkeypat
     assert response.status_code == 200
     assert called["runner"] is False
     assert run["status"] == "waiting_approval"
+    # The chosen model is persisted on the run record so resume can re-use it.
+    assert run["model"] == "llama3:8b"
     assert payload["answer"].startswith("Tool approval required")
     assert [approval["tool_id"] for approval in approvals] == ["code.lint_code"]
     assert any(event["event"] == "approval_required" for event in events)
@@ -580,6 +583,8 @@ def test_chat_api_requires_approval_before_medium_risk_tools(tmp_path, monkeypat
 
     assert approved["status"] == "approved"
     assert called["runner"] is True
+    # The resume path threads the stored model into the runner, not the default.
+    assert called["model"] == "llama3:8b"
     assert resumed["answer"] == "answer: please lint this code"
     assert client.get(f"/runs/{payload['run_id']}").json()["run"]["status"] == "completed"
 
@@ -589,7 +594,9 @@ def test_deny_approval_marks_run_denied(tmp_path, monkeypatch):
 
     store = RunHistoryStore(tmp_path / "runs.sqlite3")
     monkeypatch.setattr(server, "run_history", store)
-    monkeypatch.setattr(server, "run_orchestrator", lambda message, route, events: "unexpected")
+    monkeypatch.setattr(
+        server, "run_orchestrator", lambda message, route, events, model=None: "unexpected"
+    )
     client = TestClient(server.app)
 
     response = client.post("/chat", json={"message": "please lint this code"})
@@ -682,6 +689,32 @@ def test_chat_threads_model_override_to_runner(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert seen["model"] == "llama3:8b"
     assert invalid.status_code == 422
+
+
+def test_resolve_model_rejects_dash_flags_and_invalid_chars(tmp_path, monkeypatch):
+    import orchestrator.server as server
+    from orchestrator.server import resolve_model
+
+    # Leading-dash values would be parsed as CLI flags by `ollama run`.
+    for bad in ("--help", "-rf", "bad model", "model;rm", "a b"):
+        with pytest.raises(ValueError):
+            resolve_model(bad)
+
+    # Valid ollama tags pass through unchanged (trimmed).
+    assert resolve_model("llama3:8b") == "llama3:8b"
+    assert resolve_model(" qwen3:1.7b ") == "qwen3:1.7b"
+    assert resolve_model(None) is None
+
+    monkeypatch.setattr(server, "run_history", RunHistoryStore(tmp_path / "runs.sqlite3"))
+    monkeypatch.setattr(
+        server,
+        "run_orchestrator",
+        lambda message, route, events, model=None: "ok",
+    )
+    client = TestClient(server.app)
+
+    assert client.post("/chat", json={"message": "cpu status", "model": "--help"}).status_code == 422
+    assert client.post("/chat", json={"message": "cpu status", "model": "-x"}).status_code == 422
 
 
 def test_chat_defaults_model_to_none_when_omitted(tmp_path, monkeypatch):

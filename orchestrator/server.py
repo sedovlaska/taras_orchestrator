@@ -84,17 +84,25 @@ def route_agents(message: str) -> list[str]:
     return route_request(message).agents
 
 
+_MODEL_TAG_RE = re.compile(r"[A-Za-z0-9._:/-]+")
+
+
 def resolve_model(model: str | None) -> str | None:
     """Validate an optional per-request model override.
 
     Returns the cleaned model string, or None to use the configured default.
-    Raises ValueError when a model is supplied but is not a non-empty string.
+    Raises ValueError when a model is supplied but is not a non-empty string,
+    starts with a dash (which ``ollama run`` would parse as a CLI flag), or
+    contains characters outside the ollama tag charset.
     """
     if model is None:
         return None
     if not isinstance(model, str) or not model.strip():
         raise ValueError("model must be a non-empty string")
-    return model.strip()
+    cleaned = model.strip()
+    if cleaned.startswith("-") or not _MODEL_TAG_RE.fullmatch(cleaned):
+        raise ValueError("model contains invalid characters")
+    return cleaned
 
 
 def conversation_context(conversation_id: str | None, message: str) -> str:
@@ -674,7 +682,7 @@ async def resume_run(run_id: str):
     resume_event = {"event": "resume", "data": {"run_id": run_id}}
     run_history.append_event(run_id, "resume", resume_event["data"])
     events: list[RunEvent] = []
-    answer = run_orchestrator(run["message"], run["agents"], events)
+    answer = run_orchestrator(run["message"], run["agents"], events, model=run["model"])
     record_events(run_id, events)
     done_data = {
         "answer": answer,
@@ -740,7 +748,9 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     team_input = conversation_context(conversation_id, request.message)
     route = route_request(request.message)
-    run = run_history.create_run(request.message, route.as_dict(), conversation_id=conversation_id)
+    run = run_history.create_run(
+        request.message, route.as_dict(), conversation_id=conversation_id, model=model
+    )
     if conversation_id:
         conversation_store.append_message(conversation_id, "user", request.message)
     initial_events = initial_run_events(route)
@@ -791,7 +801,9 @@ async def chat_stream(request: ChatRequest):
     async def event_generator():
         team_input = conversation_context(conversation_id, request.message)
         route = route_request(request.message)
-        run = run_history.create_run(request.message, route.as_dict(), conversation_id=conversation_id)
+        run = run_history.create_run(
+            request.message, route.as_dict(), conversation_id=conversation_id, model=model
+        )
         if conversation_id:
             conversation_store.append_message(conversation_id, "user", request.message)
         initial_events = initial_run_events(route)
