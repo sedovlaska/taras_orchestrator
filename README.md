@@ -48,6 +48,7 @@ Open `http://localhost:8000`.
 - `GET /runbooks` returns reusable prompt runbooks for common repo workflows.
 - `GET /runbooks/{runbook_id}` returns one runbook and its template.
 - `POST /runbooks/{runbook_id}/render` renders a runbook prompt from provided field values.
+- `POST /context/bundle` builds a bounded prompt context from workspace files and search results.
 - `POST /chat` returns a complete answer.
 - `POST /chat/stream` streams route, policy, runner, tool, and final answer events for the browser UI.
 - `GET /agents/status` returns the in-process AGNO team member status.
@@ -75,6 +76,7 @@ WORKSPACE_FILE_LIST_LIMIT=500
 WORKSPACE_MAX_FILE_BYTES=1048576
 WORKSPACE_MAX_FILE_CHARS=40000
 WORKSPACE_MAX_SEARCH_RESULTS=100
+CONTEXT_BUNDLE_MAX_CHARS=12000
 ```
 
 Set `TOOL_POLICY_MODE=off` only in a trusted local environment. You can explicitly allow or deny
@@ -95,6 +97,13 @@ The browser UI includes reusable runbooks for repo onboarding, feature planning,
 failure triage, and docs updates. Each runbook declares its fields and renders to a normal chat
 prompt through the `/runbooks/{runbook_id}/render` API, so users can inspect or edit the generated
 prompt before running it.
+
+## Context Bundles
+
+The `/context/bundle` API packages selected workspace files and search results into a bounded
+Markdown context block for chat prompts. The browser UI exposes this through `Attach file` and
+`Attach search` actions in the Workspace panel. Bundles reuse the workspace path, binary, ignore,
+and size safeguards, and then apply `CONTEXT_BUNDLE_MAX_CHARS` to keep prompts manageable.
 
 ## Run History
 

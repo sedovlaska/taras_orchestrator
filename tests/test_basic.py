@@ -20,6 +20,7 @@ def test_settings_defaults():
     assert settings.tool_policy_mode == "safe"
     assert settings.run_history_db_path.endswith(".sqlite3")
     assert settings.workspace_max_file_chars > 0
+    assert settings.context_bundle_max_chars > 0
 
 
 def test_stream_event_sse():
@@ -229,6 +230,50 @@ def test_runbook_api_lists_details_and_renders_prompt():
     assert missing.status_code == 404
 
 
+def test_context_bundle_builds_bounded_file_and_search_context(tmp_path, monkeypatch):
+    import orchestrator.workspace as workspace
+    from orchestrator.context_bundles import build_context_bundle
+
+    (tmp_path / "README.md").write_text("alpha beta gamma\nsecond beta line\n", encoding="utf-8")
+    monkeypatch.setattr(workspace, "PROJECT_ROOT", tmp_path.resolve())
+    monkeypatch.setattr(settings, "workspace_max_file_bytes", 1024)
+    monkeypatch.setattr(settings, "workspace_max_file_chars", 100)
+    monkeypatch.setattr(settings, "workspace_max_search_results", 20)
+    monkeypatch.setattr(settings, "context_bundle_max_chars", 40)
+
+    bundle = build_context_bundle(paths=["README.md"], query="beta", max_chars=30)
+    partial = build_context_bundle(paths=["missing.md"], query="nomatch", max_chars=200)
+
+    assert bundle["max_chars"] == 30
+    assert bundle["truncated"] is True
+    assert "File: README.md" in bundle["prompt_context"]
+    assert partial["errors"][0]["source"] == "missing.md"
+    assert "No matches found" in partial["prompt_context"]
+    with pytest.raises(ValueError):
+        build_context_bundle()
+
+
+def test_context_bundle_api_builds_prompt_context(tmp_path, monkeypatch):
+    import orchestrator.server as server
+    import orchestrator.workspace as workspace
+
+    (tmp_path / "notes.txt").write_text("context bundle api\n", encoding="utf-8")
+    monkeypatch.setattr(workspace, "PROJECT_ROOT", tmp_path.resolve())
+    monkeypatch.setattr(settings, "workspace_max_file_bytes", 1024)
+    monkeypatch.setattr(settings, "workspace_max_file_chars", 100)
+    monkeypatch.setattr(settings, "context_bundle_max_chars", 500)
+    client = TestClient(server.app)
+
+    response = client.post("/context/bundle", json={"paths": ["notes.txt"], "query": "bundle"})
+    invalid = client.post("/context/bundle", json={})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["sections"][0]["title"] == "File: notes.txt"
+    assert "context bundle api" in payload["prompt_context"]
+    assert invalid.status_code == 422
+
+
 def test_index_exposes_runbook_controls():
     import orchestrator.server as server
 
@@ -237,6 +282,7 @@ def test_index_exposes_runbook_controls():
 
     assert 'id="runbook-select"' in html
     assert "loadRunbooks()" in html
+    assert 'id="context-file-btn"' in html
 
 
 def test_run_history_store_persists_runs_and_events(tmp_path):
