@@ -42,6 +42,9 @@ Open `http://localhost:8000`.
 - `POST /approvals/{approval_id}/approve` approves one pending tool approval.
 - `POST /approvals/{approval_id}/deny` denies one pending tool approval.
 - `POST /runs/{run_id}/resume` resumes a run after all required approvals are approved.
+- `GET /workspace/files` returns project-scoped text file metadata.
+- `GET /workspace/file?path=README.md` returns one project-scoped text file with truncation metadata.
+- `POST /workspace/search` searches project-scoped text files for a query.
 - `POST /chat` returns a complete answer.
 - `POST /chat/stream` streams route, policy, runner, tool, and final answer events for the browser UI.
 - `GET /agents/status` returns the in-process AGNO team member status.
@@ -65,6 +68,10 @@ RUN_HISTORY_DB_PATH=.data/run_history.sqlite3
 COMMAND_ALLOWED_EXECUTABLES=python,ollama,ruff,pytest,docker
 COMMAND_OUTPUT_MAX_CHARS=12000
 COMMAND_ENV_ALLOWLIST=PATH,Path,PATHEXT,SYSTEMROOT,SystemRoot,WINDIR,COMSPEC,ComSpec,TEMP,TMP,HOME,USERPROFILE,LOCALAPPDATA,APPDATA,PYTHONPATH,OLLAMA_HOST,NO_PROXY,no_proxy,PYTHONIOENCODING
+WORKSPACE_FILE_LIST_LIMIT=500
+WORKSPACE_MAX_FILE_BYTES=1048576
+WORKSPACE_MAX_FILE_CHARS=40000
+WORKSPACE_MAX_SEARCH_RESULTS=100
 ```
 
 Set `TOOL_POLICY_MODE=off` only in a trusted local environment. You can explicitly allow or deny
@@ -72,6 +79,12 @@ individual tools by id, for example `docker.list_images`. Allowed tools with ris
 `TOOL_APPROVAL_REQUIRED_RISKS` are paused until approved through the local approval API or UI.
 All local subprocess execution goes through a central command runner that enforces executable
 allowlists, project-root working directories, environment allowlists, timeouts, and output limits.
+
+## Workspace File Tools
+
+The code agent and browser UI can list, preview, and search files under the project root. These
+tools are read-only, reject path escapes, skip ignored runtime directories such as `.git`, `.data`,
+and caches, reject binary files, and apply byte, character, and result limits from `.env`.
 
 ## Run History
 

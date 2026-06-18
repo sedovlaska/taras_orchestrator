@@ -16,7 +16,7 @@
     }
 
     #sidebar {
-      width: 232px;
+      width: 280px;
       background: #191928;
       border-right: 1px solid #2a2a4a;
       display: flex;
@@ -24,6 +24,7 @@
       padding: 16px;
       gap: 12px;
       flex-shrink: 0;
+      overflow-y: auto;
     }
 
     #sidebar h2 {
@@ -208,6 +209,97 @@
       margin-top: 4px;
     }
 
+    .workspace-controls {
+      display: flex;
+      gap: 6px;
+    }
+
+    .workspace-input {
+      min-width: 0;
+      flex: 1;
+      background: #0f0f0f;
+      border: 1px solid #2a2a4a;
+      border-radius: 6px;
+      color: #f5f5f5;
+      font-size: 12px;
+      padding: 7px 8px;
+      outline: none;
+    }
+
+    .workspace-input:focus { border-color: #3b82f6; }
+
+    .workspace-btn {
+      border: 1px solid #2a2a4a;
+      background: #101016;
+      color: #c7c9d8;
+      border-radius: 6px;
+      padding: 7px 9px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .workspace-btn:hover { border-color: #60a5fa; color: #fff; }
+
+    .workspace-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-height: 62px;
+      max-height: 180px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+
+    .workspace-empty {
+      color: #666;
+      font-size: 12px;
+      line-height: 1.35;
+      padding: 8px 0;
+    }
+
+    .workspace-item {
+      width: 100%;
+      border: 1px solid #292943;
+      background: #101016;
+      border-radius: 8px;
+      color: inherit;
+      cursor: pointer;
+      padding: 7px 8px;
+      text-align: left;
+    }
+
+    .workspace-item:hover { border-color: #3b82f6; background: #171923; }
+
+    .workspace-path {
+      color: #f5f5f5;
+      font-size: 12px;
+      font-weight: 650;
+      line-height: 1.25;
+      word-break: break-word;
+    }
+
+    .workspace-meta {
+      color: #8a8a9a;
+      font-size: 10px;
+      line-height: 1.35;
+      margin-top: 3px;
+    }
+
+    .workspace-preview {
+      max-height: 190px;
+      overflow: auto;
+      border: 1px solid #292943;
+      border-radius: 8px;
+      background: #0b1020;
+      color: #cbd5e1;
+      font-family: Consolas, 'SFMono-Regular', monospace;
+      font-size: 11px;
+      line-height: 1.45;
+      padding: 9px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
     .refresh-btn {
       background: transparent;
       border: 1px solid #2a2a4a;
@@ -356,6 +448,15 @@
     <div class="history-list" id="history-list">
       <div class="history-empty">No recorded runs yet.</div>
     </div>
+    <h2>Workspace</h2>
+    <div class="workspace-controls">
+      <input class="workspace-input" id="workspace-query" type="search" placeholder="Search files">
+      <button class="workspace-btn" id="workspace-search-btn" type="button">Search</button>
+    </div>
+    <div class="workspace-list" id="workspace-list">
+      <div class="workspace-empty">Loading files...</div>
+    </div>
+    <pre class="workspace-preview" id="workspace-preview">Select a file to preview.</pre>
     <div class="status-summary">
       <div class="count" id="online-count">-</div>
       <div class="label">online</div>
@@ -382,6 +483,10 @@
     const onlineCount = document.getElementById('online-count');
     const timeline = document.getElementById('timeline');
     const historyList = document.getElementById('history-list');
+    const workspaceQuery = document.getElementById('workspace-query');
+    const workspaceList = document.getElementById('workspace-list');
+    const workspacePreview = document.getElementById('workspace-preview');
+    const workspaceSearchBtn = document.getElementById('workspace-search-btn');
 
     const AGENT_COLORS = { code: '#3b82f6', db: '#f97316', devops: '#ef4444', docs: '#8b5cf6', system: '#10b981', docker: '#06b6d4' };
     const AGENT_NAMES = ['code', 'db', 'devops', 'docs', 'system', 'docker'];
@@ -541,6 +646,79 @@
       (eventsData.events || []).forEach(timelineFromStoredEvent);
       setActiveAgents(run.agents || []);
       clearActiveAgentsSoon();
+    }
+
+    function fileSizeLabel(bytes) {
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    function renderWorkspaceItems(items, mode = 'files') {
+      workspaceList.innerHTML = '';
+      if (!items.length) {
+        workspaceList.innerHTML = '<div class="workspace-empty">No workspace matches.</div>';
+        return;
+      }
+      items.forEach(item => {
+        const button = document.createElement('button');
+        button.className = 'workspace-item';
+        button.type = 'button';
+        const path = item.path;
+        const meta = mode === 'search'
+          ? `line ${item.line} · ${item.preview || ''}`
+          : `${fileSizeLabel(item.size_bytes || 0)} · ${item.modified_at || ''}`;
+        button.innerHTML = `
+          <div class="workspace-path">${escapeHtml(path)}</div>
+          <div class="workspace-meta">${escapeHtml(meta)}</div>
+        `;
+        button.addEventListener('click', () => openWorkspaceFile(path));
+        workspaceList.appendChild(button);
+      });
+    }
+
+    async function loadWorkspaceFiles() {
+      try {
+        const resp = await fetch('/workspace/files?limit=80');
+        const data = await resp.json();
+        renderWorkspaceItems(data.files || []);
+      } catch (err) {
+        workspaceList.innerHTML = '<div class="workspace-empty">Workspace unavailable.</div>';
+      }
+    }
+
+    async function searchWorkspace() {
+      const query = workspaceQuery.value.trim();
+      if (!query) {
+        loadWorkspaceFiles();
+        return;
+      }
+      workspaceList.innerHTML = '<div class="workspace-empty">Searching...</div>';
+      try {
+        const resp = await fetch('/workspace/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query, limit: 80 }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || 'search failed');
+        renderWorkspaceItems(data.results || [], 'search');
+      } catch (err) {
+        workspaceList.innerHTML = `<div class="workspace-empty">${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    async function openWorkspaceFile(path) {
+      workspacePreview.textContent = 'Loading...';
+      try {
+        const resp = await fetch(`/workspace/file?path=${encodeURIComponent(path)}`);
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || 'read failed');
+        const file = data.file;
+        workspacePreview.textContent = `${file.path}${file.truncated ? ' [truncated]' : ''}\n\n${file.content}`;
+      } catch (err) {
+        workspacePreview.textContent = err.message;
+      }
     }
 
     function renderAgents() {
@@ -877,6 +1055,13 @@
     }
 
     sendBtn.addEventListener('click', sendMessage);
+    workspaceSearchBtn.addEventListener('click', searchWorkspace);
+    workspaceQuery.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        searchWorkspace();
+      }
+    });
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
@@ -890,6 +1075,7 @@
 
     refreshAgents();
     refreshRuns();
+    loadWorkspaceFiles();
     setInterval(refreshAgents, 30000);
     setInterval(refreshRuns, 30000);
   </script>

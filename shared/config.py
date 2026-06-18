@@ -20,6 +20,10 @@ class Settings(BaseSettings):
         "TEMP,TMP,HOME,USERPROFILE,LOCALAPPDATA,APPDATA,"
         "PYTHONPATH,OLLAMA_HOST,NO_PROXY,no_proxy,PYTHONIOENCODING"
     )
+    workspace_file_list_limit: int = 500
+    workspace_max_file_bytes: int = 1_048_576
+    workspace_max_file_chars: int = 40_000
+    workspace_max_search_results: int = 100
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
