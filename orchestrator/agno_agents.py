@@ -16,11 +16,11 @@ LANGUAGE_INSTRUCTION = "Reply in the same language as the user. If the user writ
 __all__ = ["AGNO_MEMBER_NAMES", "create_orchestrator"]
 
 
-def get_model() -> Ollama:
-    return Ollama(id=settings.llm_model, host=settings.ollama_host)
+def get_model(model_id: str | None = None) -> Ollama:
+    return Ollama(id=model_id or settings.llm_model, host=settings.ollama_host)
 
 
-def create_code_agent() -> Agent:
+def create_code_agent(model_id: str | None = None) -> Agent:
     @tool
     def analyze_code(code: str) -> str:
         """Analyze code quality and patterns."""
@@ -70,7 +70,7 @@ def create_code_agent() -> Agent:
 
     return Agent(
         name="code",
-        model=get_model(),
+        model=get_model(model_id),
         tools=[analyze_code, lint_code, generate_code, list_files, read_file, search_files],
         instructions=[
             "You are a code analysis and generation agent.",
@@ -81,7 +81,7 @@ def create_code_agent() -> Agent:
     )
 
 
-def create_db_agent() -> Agent:
+def create_db_agent(model_id: str | None = None) -> Agent:
     @tool
     def run_query(sql: str) -> str:
         """Prepare a SQL query execution summary."""
@@ -96,7 +96,7 @@ def create_db_agent() -> Agent:
 
     return Agent(
         name="db",
-        model=get_model(),
+        model=get_model(model_id),
         tools=[run_query, show_schema],
         instructions=[
             "You are a database agent.",
@@ -107,7 +107,7 @@ def create_db_agent() -> Agent:
     )
 
 
-def create_devops_agent() -> Agent:
+def create_devops_agent(model_id: str | None = None) -> Agent:
     @tool
     def run_tests(path: str = ".") -> str:
         """Run the test suite for a path."""
@@ -125,7 +125,7 @@ def create_devops_agent() -> Agent:
 
     return Agent(
         name="devops",
-        model=get_model(),
+        model=get_model(model_id),
         tools=[run_tests, build_project],
         instructions=[
             "You are a DevOps agent for testing and building.",
@@ -135,10 +135,10 @@ def create_devops_agent() -> Agent:
     )
 
 
-def create_docs_agent() -> Agent:
+def create_docs_agent(model_id: str | None = None) -> Agent:
     return Agent(
         name="docs",
-        model=get_model(),
+        model=get_model(model_id),
         instructions=[
             "You are a documentation agent.",
             "When the user asks for documentation about a named subject, generate useful documentation immediately.",
@@ -148,7 +148,7 @@ def create_docs_agent() -> Agent:
         ],
     )
 
-def create_system_agent() -> Agent:
+def create_system_agent(model_id: str | None = None) -> Agent:
     @tool
     def get_system_info() -> str:
         """Get CPU and memory usage."""
@@ -186,7 +186,7 @@ def create_system_agent() -> Agent:
 
     return Agent(
         name="system",
-        model=get_model(),
+        model=get_model(model_id),
         tools=[get_system_info, list_processes, get_disk_usage],
         instructions=[
             "You are a system monitoring agent.",
@@ -197,7 +197,7 @@ def create_system_agent() -> Agent:
     )
 
 
-def create_docker_agent() -> Agent:
+def create_docker_agent(model_id: str | None = None) -> Agent:
     @tool
     def list_containers() -> str:
         """List Docker containers."""
@@ -214,7 +214,7 @@ def create_docker_agent() -> Agent:
 
     return Agent(
         name="docker",
-        model=get_model(),
+        model=get_model(model_id),
         tools=[list_containers, list_images],
         instructions=[
             "You are a Docker management agent.",
@@ -224,19 +224,19 @@ def create_docker_agent() -> Agent:
     )
 
 
-def create_orchestrator() -> Team:
+def create_orchestrator(model_id: str | None = None) -> Team:
     return Team(
         name="orchestrator",
         mode="route",
         members=[
-            create_code_agent(),
-            create_db_agent(),
-            create_devops_agent(),
-            create_docs_agent(),
-            create_system_agent(),
-            create_docker_agent(),
+            create_code_agent(model_id),
+            create_db_agent(model_id),
+            create_devops_agent(model_id),
+            create_docs_agent(model_id),
+            create_system_agent(model_id),
+            create_docker_agent(model_id),
         ],
-        model=get_model(),
+        model=get_model(model_id),
         show_members_responses=True,
         markdown=True,
         instructions=[

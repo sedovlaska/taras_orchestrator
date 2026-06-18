@@ -464,7 +464,7 @@ def test_chat_api_records_run_history(tmp_path, monkeypatch):
     store = RunHistoryStore(tmp_path / "runs.sqlite3")
     monkeypatch.setattr(server, "run_history", store)
 
-    def fake_runner(message, route, events):
+    def fake_runner(message, route, events, model=None):
         events.append({"event": "runner_start", "data": {"runner": "fake"}})
         events.append({"event": "runner_result", "data": {"runner": "fake", "status": "ok"}})
         return f"answer: {message}"
@@ -612,6 +612,98 @@ def test_agno_agents_import_with_model_dependencies():
     assert callable(create_orchestrator)
 
 
+def test_models_api_parses_ollama_tags(monkeypatch):
+    import orchestrator.server as server
+
+    # Exercise the real parser by faking only the HTTP call.
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def read(self):
+            return json.dumps(self._payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class FakeOpener:
+        def open(self, request, timeout=None):
+            return FakeResponse(
+                {"models": [{"name": "qwen3:1.7b"}, {"name": "llama3:8b"}, {"size": 1}]}
+            )
+
+    monkeypatch.setattr(server.urllib.request, "build_opener", lambda *a, **k: FakeOpener())
+    client = TestClient(server.app)
+
+    payload = client.get("/models").json()
+
+    assert payload["reachable"] is True
+    assert payload["models"] == ["qwen3:1.7b", "llama3:8b"]
+    assert payload["default_model"] == settings.llm_model
+
+
+def test_models_api_degrades_when_ollama_unreachable(monkeypatch):
+    import orchestrator.server as server
+
+    class FailingOpener:
+        def open(self, request, timeout=None):
+            raise OSError("connection refused")
+
+    monkeypatch.setattr(server.urllib.request, "build_opener", lambda *a, **k: FailingOpener())
+    client = TestClient(server.app)
+
+    payload = client.get("/models").json()
+
+    assert payload["reachable"] is False
+    assert payload["models"] == []
+    assert payload["default_model"] == settings.llm_model
+
+
+def test_chat_threads_model_override_to_runner(tmp_path, monkeypatch):
+    import orchestrator.server as server
+
+    monkeypatch.setattr(server, "run_history", RunHistoryStore(tmp_path / "runs.sqlite3"))
+    seen = {}
+
+    def fake_runner(message, route, events, model=None):
+        seen["model"] = model
+        events.append({"event": "runner_result", "data": {"runner": "fake", "status": "ok"}})
+        return "ok"
+
+    monkeypatch.setattr(server, "run_orchestrator", fake_runner)
+    client = TestClient(server.app)
+
+    response = client.post("/chat", json={"message": "cpu status", "model": "llama3:8b"})
+    invalid = client.post("/chat", json={"message": "cpu status", "model": "   "})
+
+    assert response.status_code == 200
+    assert seen["model"] == "llama3:8b"
+    assert invalid.status_code == 422
+
+
+def test_chat_defaults_model_to_none_when_omitted(tmp_path, monkeypatch):
+    import orchestrator.server as server
+
+    monkeypatch.setattr(server, "run_history", RunHistoryStore(tmp_path / "runs.sqlite3"))
+    seen = {}
+
+    def fake_runner(message, route, events, model=None):
+        seen["model"] = model
+        events.append({"event": "runner_result", "data": {"runner": "fake", "status": "ok"}})
+        return "ok"
+
+    monkeypatch.setattr(server, "run_orchestrator", fake_runner)
+    client = TestClient(server.app)
+
+    response = client.post("/chat", json={"message": "cpu status"})
+
+    assert response.status_code == 200
+    assert seen["model"] is None
+
+
 def test_conversation_store_creates_appends_lists_and_deletes(tmp_path):
     from orchestrator.conversations import ConversationStore
 
@@ -645,7 +737,7 @@ def test_conversation_api_crud_and_multi_turn_context(tmp_path, monkeypatch):
     )
     seen = {}
 
-    def fake_runner(message, route, events):
+    def fake_runner(message, route, events, model=None):
         seen["message"] = message
         events.append({"event": "runner_result", "data": {"runner": "fake", "status": "ok"}})
         return f"answer: {message}"
