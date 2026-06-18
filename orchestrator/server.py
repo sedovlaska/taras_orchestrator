@@ -6,7 +6,6 @@ import os
 import re
 import subprocess
 import sys
-import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -15,30 +14,17 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-from orchestrator.agno_agents import AGNO_MEMBER_NAMES
+from orchestrator.policy import current_policy
+from orchestrator.routing import RoutingResult, route_request, should_use_local_system_status
+from orchestrator.tool_registry import AGNO_MEMBER_NAMES, get_tool, tool_inventory
 from shared.config import settings
 
 app = FastAPI(title="AGNO Team Orchestrator")
 
 STATIC_DIR = Path(__file__).parent.parent / "static"
 PROJECT_ROOT = Path(__file__).parent.parent
-SYSTEM_KEYWORDS = (
-    "\u0441\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0435 \u0441\u0438\u0441\u0442\u0435\u043c\u044b",
-    "\u0441\u0438\u0441\u0442\u0435\u043c",
-    "cpu",
-    "memory",
-    "\u043f\u0430\u043c\u044f\u0442",
-    "\u0434\u0438\u0441\u043a",
-    "disk",
-)
-ROUTE_KEYWORDS = {
-    "docs": ("doc", "docs", "readme", "documentation", "\u0434\u043e\u043a\u0443\u043c\u0435\u043d", "\u0440\u0438\u0434\u043c\u0438"),
-    "code": ("code", "lint", "refactor", "review", "\u043a\u043e\u0434", "\u0440\u0435\u0444\u0430\u043a\u0442", "\u043b\u0438\u043d\u0442"),
-    "devops": ("test", "build", "ci", "deploy", "\u0442\u0435\u0441\u0442", "\u0441\u0431\u043e\u0440"),
-    "system": SYSTEM_KEYWORDS,
-    "docker": ("docker", "container", "image", "\u043a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440"),
-    "db": ("sql", "database", "schema", "migration", "\u0431\u0430\u0437", "\u0441\u0445\u0435\u043c"),
-}
+
+RunEvent = dict[str, object]
 
 class ChatRequest(BaseModel):
     message: str
@@ -47,22 +33,19 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     agents_used: list[str]
+    route: dict
+    events: list[dict]
 
 def route_agents(message: str) -> list[str]:
-    lowered = message.lower()
-    agents = []
-    for name, keywords in ROUTE_KEYWORDS.items():
-        for keyword in keywords:
-            if keyword in ("doc", "docs"):
-                if re.search(r"\bdocs?\b", lowered):
-                    agents.append(name)
-                    break
-            elif keyword in lowered:
-                agents.append(name)
-                break
-    return agents or ["orchestrator"]
+    return route_request(message).agents
 
-def system_status() -> str:
+def system_status(events: list[RunEvent] | None = None) -> str:
+    policy = current_policy()
+    for tool_id in ("system.get_system_info", "system.get_disk_usage"):
+        policy.require(tool_id)
+        if events is not None:
+            events.append({"event": "tool_start", "data": {"tool_id": tool_id, "agent": "system"}})
+
     cpu = psutil.cpu_percent(interval=1)
     memory = psutil.virtual_memory()
     disks = []
@@ -80,17 +63,21 @@ def system_status() -> str:
     used_mb = memory.used // (1024**2)
     total_mb = memory.total // (1024**2)
 
+    if events is not None:
+        for tool_id in ("system.get_system_info", "system.get_disk_usage"):
+            events.append(
+                {
+                    "event": "tool_result",
+                    "data": {"tool_id": tool_id, "agent": "system", "status": "ok"},
+                }
+            )
+
     return (
         "\u0421\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0435 \u0441\u0438\u0441\u0442\u0435\u043c\u044b:\n"
         f"CPU: {cpu}%\n"
         f"Memory: {memory.percent}% ({used_mb}MB / {total_mb}MB)\n"
         f"Disk:\n{disk_block}"
     )
-
-
-def should_use_local_system_status(message: str) -> bool:
-    lowered = message.lower()
-    return any(keyword in lowered for keyword in SYSTEM_KEYWORDS)
 
 
 def _ollama_env() -> dict[str, str]:
@@ -232,18 +219,40 @@ def _skip_non_system() -> str:
     raise RuntimeError("not a system request")
 
 
-def run_orchestrator(message: str, agents: list[str]) -> str:
+def run_orchestrator(
+    message: str,
+    route: RoutingResult | list[str],
+    events: list[RunEvent] | None = None,
+) -> str:
     errors = []
+    agents = route.agents if isinstance(route, RoutingResult) else route
     for label, runner in (
         ("AGNO Team", lambda: ask_agno_team(message, agents)),
-        ("Local system", lambda: system_status() if should_use_local_system_status(message) else _skip_non_system()),
+        (
+            "Local system",
+            lambda: system_status(events)
+            if should_use_local_system_status(message)
+            else _skip_non_system(),
+        ),
         ("Ollama direct", lambda: ask_ollama_direct(message)),
         ("Ollama CLI", lambda: ask_ollama_cli(message)),
     ):
+        if events is not None:
+            events.append({"event": "runner_start", "data": {"runner": label}})
         try:
-            return runner()
+            answer = runner()
+            if events is not None:
+                events.append({"event": "runner_result", "data": {"runner": label, "status": "ok"}})
+            return answer
         except Exception as exc:
             errors.append(f"{label}: {exc}")
+            if events is not None:
+                events.append(
+                    {
+                        "event": "runner_error",
+                        "data": {"runner": label, "message": _friendly_model_error(str(exc))},
+                    }
+                )
             print(f"{label.upper().replace(' ', '_')}_FALLBACK error={str(exc)!r}", flush=True)
 
     return _friendly_model_error("; ".join(errors))
@@ -256,7 +265,22 @@ async def health():
         "model": settings.llm_model,
         "ollama_host": settings.ollama_host,
         "members": AGNO_MEMBER_NAMES,
+        "policy": {
+            "mode": settings.tool_policy_mode,
+            "allowed_risks": settings.tool_allowed_risks,
+            "denied": settings.tool_denied,
+        },
     }
+
+
+@app.get("/tools")
+async def tools():
+    policy = current_policy()
+    inventory = []
+    for tool in tool_inventory():
+        decision = policy.evaluate(get_tool(tool["id"]))
+        inventory.append({**tool, "policy": decision.as_dict()})
+    return {"tools": inventory}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -267,8 +291,15 @@ async def index():
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    agents = route_agents(request.message)
-    return ChatResponse(answer=run_orchestrator(request.message, agents), agents_used=agents)
+    route = route_request(request.message)
+    events: list[RunEvent] = []
+    answer = run_orchestrator(request.message, route, events)
+    return ChatResponse(
+        answer=answer,
+        agents_used=route.agents,
+        route=route.as_dict(),
+        events=events,
+    )
 
 
 def _sse(event: str, data: dict) -> str:
@@ -278,14 +309,35 @@ def _sse(event: str, data: dict) -> str:
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
     async def event_generator():
-        agents = route_agents(request.message)
-        intent = "multi" if len(agents) > 1 else agents[0]
-        yield _sse("classify", {"intent": intent, "agents": agents})
-        for agent in agents:
+        route = route_request(request.message)
+        yield _sse("route", route.as_dict())
+        yield _sse(
+            "classify",
+            {
+                "intent": route.intent,
+                "agents": route.agents,
+                "confidence": route.confidence,
+                "reason": route.reason,
+            },
+        )
+        for decision in route.policy_decisions:
+            yield _sse("policy_decision", decision)
+        for agent in route.agents:
             yield _sse("agent_start", {"agent": agent})
         await asyncio.sleep(0.05)
-        answer = await asyncio.to_thread(run_orchestrator, request.message, agents)
-        yield _sse("done", {"answer": answer, "intent": intent})
+        events: list[RunEvent] = []
+        answer = await asyncio.to_thread(run_orchestrator, request.message, route, events)
+        for event in events:
+            yield _sse(str(event["event"]), dict(event["data"]))
+        yield _sse(
+            "done",
+            {
+                "answer": answer,
+                "intent": route.intent,
+                "agents": route.agents,
+                "route": route.as_dict(),
+            },
+        )
 
     return StreamingResponse(
         event_generator(),

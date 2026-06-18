@@ -8,7 +8,7 @@ from typing import AsyncIterator
 
 @dataclass
 class StreamEvent:
-    event: str  # classify | agent_start | agent_result | done | error
+    event: str
     data: dict = field(default_factory=dict)
 
     def to_sse(self) -> str:
