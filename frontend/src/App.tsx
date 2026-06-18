@@ -12,6 +12,7 @@ import {
   Loader,
   NavLink,
   Paper,
+  Popover,
   ScrollArea,
   Select,
   SimpleGrid,
@@ -38,6 +39,8 @@ import {
   IconDatabase,
   IconFileSearch,
   IconHistory,
+  IconMessage,
+  IconMessagePlus,
   IconPlayerPlay,
   IconRefresh,
   IconRobot,
@@ -60,6 +63,7 @@ import { api, streamChat } from "./api";
 import type {
   AgentStatus,
   ChatMessage,
+  Conversation,
   ContextPack,
   Diagnostics,
   EvalSuite,
@@ -91,6 +95,13 @@ const agentColors: Record<string, string> = {
 
 const makeId = () => Math.random().toString(36).slice(2);
 
+const WELCOME_MESSAGE =
+  "UI is live without Ollama. Browse workspace files, run diagnostics, run local evals, inspect history, and prepare prompts.";
+
+function welcomeMessages(): ChatMessage[] {
+  return [{ id: makeId(), role: "system", content: WELCOME_MESSAGE }];
+}
+
 function notifyError(error: unknown, title = "Request failed") {
   notifications.show({
     color: "red",
@@ -102,6 +113,21 @@ function notifyError(error: unknown, title = "Request failed") {
 function formatDate(value?: string) {
   if (!value) return "";
   return new Date(value).toLocaleString();
+}
+
+function relativeTime(value?: string) {
+  if (!value) return "";
+  const then = new Date(value).getTime();
+  if (Number.isNaN(then)) return "";
+  const seconds = Math.round((Date.now() - then) / 1000);
+  if (seconds < 45) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(value).toLocaleDateString();
 }
 
 function eventTone(event: TimelineEvent) {
@@ -270,14 +296,11 @@ export function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [agents, setAgents] = useState<AgentStatus[]>([]);
   const [activeAgents, setActiveAgents] = useState<string[]>([]);
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: makeId(),
-      role: "system",
-      content:
-        "UI is live without Ollama. Browse workspace files, run diagnostics, run local evals, inspect history, and prepare prompts."
-    }
-  ]);
+  const [messages, setMessages] = useState<ChatMessage[]>(welcomeMessages);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [loadingChat, setLoadingChat] = useState(false);
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
@@ -306,14 +329,15 @@ export function App() {
 
   async function refreshAll() {
     try {
-      const [healthData, agentData, runData, summaryData, packsData, runbooksData] =
+      const [healthData, agentData, runData, summaryData, packsData, runbooksData, conversationsData] =
         await Promise.all([
           api.health(),
           api.agents(),
           api.runs(),
           api.summary(),
           api.contextPacks(),
-          api.runbooks()
+          api.runbooks(),
+          api.conversations()
         ]);
       setHealth(healthData);
       setAgents(agentData.agents || []);
@@ -321,6 +345,7 @@ export function App() {
       setSummary(summaryData.summary || {});
       setContextPacks(packsData.packs || []);
       setRunbooks(runbooksData.runbooks || []);
+      setConversations(conversationsData.conversations || []);
       if (!selectedRunbookId && runbooksData.runbooks?.length) {
         setSelectedRunbookId(runbooksData.runbooks[0].id);
       }
@@ -491,6 +516,59 @@ export function App() {
     }
   }
 
+  async function refreshConversations() {
+    try {
+      const data = await api.conversations();
+      setConversations(data.conversations || []);
+    } catch (error) {
+      notifyError(error, "Conversations failed");
+    }
+  }
+
+  function startNewConversation() {
+    setActiveConversationId(null);
+    setMessages(welcomeMessages());
+    setTimeline([]);
+    setActiveAgents([]);
+    setInput("");
+  }
+
+  async function openConversation(id: string) {
+    if (id === activeConversationId || loadingConversationId) return;
+    setLoadingConversationId(id);
+    try {
+      const data = await api.conversation(id);
+      setActiveConversationId(id);
+      setTimeline([]);
+      setActiveAgents([]);
+      const loaded: ChatMessage[] = data.messages.map((message) => ({
+        id: makeId(),
+        role: message.role === "assistant" ? "assistant" : message.role === "user" ? "user" : "system",
+        content: message.content
+      }));
+      setMessages(
+        loaded.length
+          ? loaded
+          : [{ id: makeId(), role: "system", content: "Empty conversation. Send a message to begin." }]
+      );
+    } catch (error) {
+      notifyError(error, "Conversation load failed");
+    } finally {
+      setLoadingConversationId(null);
+    }
+  }
+
+  async function confirmDeleteConversation(id: string) {
+    setPendingDeleteId(null);
+    try {
+      await api.deleteConversation(id);
+      setConversations((items) => items.filter((item) => item.id !== id));
+      if (id === activeConversationId) startNewConversation();
+    } catch (error) {
+      notifyError(error, "Delete conversation failed");
+    }
+  }
+
   async function sendMessage(override?: string) {
     const text = (override ?? input).trim();
     if (!text || loadingChat) return;
@@ -499,6 +577,23 @@ export function App() {
     setInput("");
     setTimeline([]);
     setActiveAgents([]);
+
+    // Auto-create a conversation on first send so every thread is persisted
+    // and shows up in the sidebar without a separate "empty thread" state.
+    let conversationId = activeConversationId;
+    if (!conversationId) {
+      try {
+        const created = await api.createConversation(text.slice(0, 60));
+        conversationId = created.conversation.id;
+        setActiveConversationId(conversationId);
+        setMessages([]);
+      } catch (error) {
+        notifyError(error, "New conversation failed");
+        setLoadingChat(false);
+        return;
+      }
+    }
+
     setMessages((items) => [...items, { id: makeId(), role: "user", content: text }]);
 
     let assistantId = makeId();
@@ -525,7 +620,7 @@ export function App() {
             )
           );
         }
-      });
+      }, conversationId);
       refreshAll();
     } catch (error) {
       setMessages((items) =>
@@ -608,6 +703,105 @@ export function App() {
                 Ollama is optional for UI exploration. Local APIs are online.
               </Text>
             </Card>
+
+            <Stack gap="xs">
+              <Text size="xs" c="dimmed" fw={700} tt="uppercase">
+                Conversations
+              </Text>
+              <Button
+                variant={activeConversationId ? "default" : "light"}
+                leftSection={<IconMessagePlus size={16} />}
+                onClick={startNewConversation}
+                fullWidth
+                justify="flex-start"
+              >
+                New conversation
+              </Button>
+              <Stack gap={4}>
+                {conversations.length === 0 ? (
+                  <Text size="sm" c="dimmed" ta="center" py="sm">
+                    Your conversations will appear here. Start one above or just send a message.
+                  </Text>
+                ) : (
+                  conversations.map((conversation) => {
+                    const active = conversation.id === activeConversationId;
+                    return (
+                      <NavLink
+                        key={conversation.id}
+                        active={active}
+                        label={conversation.title}
+                        description={relativeTime(conversation.updated_at)}
+                        onClick={() => openConversation(conversation.id)}
+                        leftSection={
+                          loadingConversationId === conversation.id ? (
+                            <Loader size={14} />
+                          ) : (
+                            <IconMessage size={16} />
+                          )
+                        }
+                        rightSection={
+                          <Popover
+                            opened={pendingDeleteId === conversation.id}
+                            onChange={(opened) => !opened && setPendingDeleteId(null)}
+                            position="bottom-end"
+                            withArrow
+                            shadow="md"
+                            width={220}
+                          >
+                            <Popover.Target>
+                              <ActionIcon
+                                component="div"
+                                role="button"
+                                color="red"
+                                variant="subtle"
+                                size="sm"
+                                aria-label={`Delete ${conversation.title}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setPendingDeleteId(
+                                    pendingDeleteId === conversation.id ? null : conversation.id
+                                  );
+                                }}
+                              >
+                                <IconTrash size={14} />
+                              </ActionIcon>
+                            </Popover.Target>
+                            <Popover.Dropdown onClick={(event) => event.stopPropagation()}>
+                              <Text size="sm" fw={600}>
+                                Delete this conversation?
+                              </Text>
+                              <Text size="xs" c="dimmed" mt={2}>
+                                This permanently removes its messages.
+                              </Text>
+                              <Group justify="flex-end" gap="xs" mt="sm">
+                                <Button
+                                  size="xs"
+                                  variant="default"
+                                  onClick={() => setPendingDeleteId(null)}
+                                >
+                                  Cancel
+                                </Button>
+                                <Button
+                                  size="xs"
+                                  color="red"
+                                  onClick={() => confirmDeleteConversation(conversation.id)}
+                                >
+                                  Delete
+                                </Button>
+                              </Group>
+                            </Popover.Dropdown>
+                          </Popover>
+                        }
+                        variant="light"
+                        className="conversation-link"
+                      />
+                    );
+                  })
+                )}
+              </Stack>
+            </Stack>
+
+            <Divider />
 
             <Stack gap={6}>
               {["code", "db", "devops", "docs", "system", "docker"].map((name) => {

@@ -1,5 +1,7 @@
 import type {
   AgentStatus,
+  Conversation,
+  ConversationMessage,
   ContextPack,
   Diagnostics,
   EvalSuite,
@@ -82,7 +84,21 @@ export const api = {
     jsonRequest<{ answer: string; agents_used: string[]; events: TimelineEvent[] }>(
       `/runs/${encodeURIComponent(runId)}/resume`,
       { method: "POST" }
-    )
+    ),
+  conversations: () => jsonRequest<{ conversations: Conversation[] }>("/conversations?limit=50"),
+  conversation: (id: string) =>
+    jsonRequest<{ conversation: Conversation; messages: ConversationMessage[] }>(
+      `/conversations/${encodeURIComponent(id)}`
+    ),
+  createConversation: (title?: string) =>
+    jsonRequest<{ conversation: Conversation }>("/conversations", {
+      method: "POST",
+      body: JSON.stringify({ title: title || null })
+    }),
+  deleteConversation: (id: string) =>
+    jsonRequest<{ deleted: boolean }>(`/conversations/${encodeURIComponent(id)}`, {
+      method: "DELETE"
+    })
 };
 
 export async function streamChat(
@@ -92,12 +108,13 @@ export async function streamChat(
     onAgents: (agents: string[]) => void;
     onChunk: (content: string) => void;
     onDone: (payload: { answer?: string; agents_used?: string[] }) => void;
-  }
+  },
+  conversationId?: string | null
 ) {
   const response = await fetch("/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message })
+    body: JSON.stringify({ message, conversation_id: conversationId || null })
   });
 
   if (!response.ok || !response.body) {
