@@ -22,6 +22,7 @@ def test_settings_defaults():
     assert settings.workspace_max_file_chars > 0
     assert settings.context_bundle_max_chars > 0
     assert settings.context_pack_db_path.endswith(".sqlite3")
+    assert settings.conversations_db_path.endswith(".sqlite3")
 
 
 def test_stream_event_sse():
@@ -609,6 +610,84 @@ def test_agno_agents_import_with_model_dependencies():
 
     assert "code" in AGNO_MEMBER_NAMES
     assert callable(create_orchestrator)
+
+
+def test_conversation_store_creates_appends_lists_and_deletes(tmp_path):
+    from orchestrator.conversations import ConversationStore
+
+    store = ConversationStore(tmp_path / "conversations.sqlite3")
+    convo = store.create_conversation("My thread")
+    store.append_message(convo["id"], "user", "hello")
+    store.append_message(convo["id"], "assistant", "hi there")
+
+    messages = store.list_messages(convo["id"])
+    listing = store.list_conversations()
+    detail = store.get_conversation(convo["id"])
+
+    assert convo["title"] == "My thread"
+    assert listing[0]["id"] == convo["id"]
+    assert detail["id"] == convo["id"]
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert [m["content"] for m in messages] == ["hello", "hi there"]
+    assert store.delete_conversation(convo["id"]) is True
+    assert store.get_conversation(convo["id"]) is None
+    assert store.list_messages(convo["id"]) == []
+    assert store.delete_conversation(convo["id"]) is False
+
+
+def test_conversation_api_crud_and_multi_turn_context(tmp_path, monkeypatch):
+    import orchestrator.server as server
+    from orchestrator.conversations import ConversationStore
+
+    monkeypatch.setattr(server, "run_history", RunHistoryStore(tmp_path / "runs.sqlite3"))
+    monkeypatch.setattr(
+        server, "conversation_store", ConversationStore(tmp_path / "conversations.sqlite3")
+    )
+    seen = {}
+
+    def fake_runner(message, route, events):
+        seen["message"] = message
+        events.append({"event": "runner_result", "data": {"runner": "fake", "status": "ok"}})
+        return f"answer: {message}"
+
+    monkeypatch.setattr(server, "run_orchestrator", fake_runner)
+    client = TestClient(server.app)
+
+    created = client.post("/conversations", json={"title": "Session"})
+    conversation_id = created.json()["conversation"]["id"]
+
+    first = client.post(
+        "/chat", json={"message": "cpu status", "conversation_id": conversation_id}
+    )
+    assert first.status_code == 200
+    assert seen["message"] == "cpu status"  # no prior turns yet
+
+    second = client.post(
+        "/chat", json={"message": "disk usage", "conversation_id": conversation_id}
+    )
+    assert second.status_code == 200
+    # prior turns are fed as context to the second turn
+    assert "cpu status" in seen["message"]
+    assert "Current user message: disk usage" in seen["message"]
+
+    listing = client.get("/conversations").json()["conversations"]
+    detail = client.get(f"/conversations/{conversation_id}").json()
+    messages = detail["messages"]
+
+    assert listing[0]["id"] == conversation_id
+    assert [m["role"] for m in messages] == ["user", "assistant", "user", "assistant"]
+    assert messages[0]["content"] == "cpu status"
+    assert messages[1]["content"] == "answer: cpu status"
+
+    deleted = client.delete(f"/conversations/{conversation_id}")
+    missing_detail = client.get(f"/conversations/{conversation_id}")
+    missing_chat = client.post(
+        "/chat", json={"message": "cpu status", "conversation_id": conversation_id}
+    )
+
+    assert deleted.status_code == 200
+    assert missing_detail.status_code == 404
+    assert missing_chat.status_code == 404
 
 
 async def test_event_queue():

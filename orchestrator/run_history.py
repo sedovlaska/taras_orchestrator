@@ -52,7 +52,8 @@ class RunHistoryStore:
                 answer TEXT,
                 intent TEXT NOT NULL,
                 agents_json TEXT NOT NULL,
-                route_json TEXT NOT NULL
+                route_json TEXT NOT NULL,
+                conversation_id TEXT
             );
 
             CREATE TABLE IF NOT EXISTS run_events (
@@ -83,8 +84,11 @@ class RunHistoryStore:
             CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
             """
         )
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+        if "conversation_id" not in columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN conversation_id TEXT")
 
-    def create_run(self, message: str, route: dict) -> dict:
+    def create_run(self, message: str, route: dict, conversation_id: str | None = None) -> dict:
         run_id = str(uuid4())
         now = utc_now()
         agents = route.get("agents", [])
@@ -92,8 +96,8 @@ class RunHistoryStore:
             conn.execute(
                 """
                 INSERT INTO runs
-                    (id, created_at, updated_at, status, message, answer, intent, agents_json, route_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, created_at, updated_at, status, message, answer, intent, agents_json, route_json, conversation_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -105,6 +109,7 @@ class RunHistoryStore:
                     route.get("intent", "orchestrator"),
                     json.dumps(agents, ensure_ascii=False),
                     json.dumps(route, ensure_ascii=False),
+                    conversation_id,
                 ),
             )
         return {
@@ -117,6 +122,7 @@ class RunHistoryStore:
             "intent": route.get("intent", "orchestrator"),
             "agents": agents,
             "route": route,
+            "conversation_id": conversation_id,
         }
 
     def append_event(self, run_id: str, event: str, data: dict) -> dict:
