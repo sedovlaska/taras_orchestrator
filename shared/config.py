@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
 
     orchestrator_port: int = 8000
+    # Deterministic handoff/step budget for the runner loop. A run may attempt at
+    # most this many runner transitions (AGNO Team, local system, Ollama
+    # fallbacks) before the loop stops and emits a `budget_exhausted` trace event.
+    # Guards against unbounded handoff loops, the top multi-agent failure mode.
+    max_runner_steps: int = 8
     tool_policy_mode: str = "safe"
     tool_allowed_risks: str = "low,medium"
     tool_allowed: str = ""

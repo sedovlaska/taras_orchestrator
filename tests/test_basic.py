@@ -871,6 +871,46 @@ def test_run_orchestrator_skips_ollama_fallbacks_for_openai_provider(monkeypatch
     assert "agno boom" in answer
 
 
+def test_run_orchestrator_enforces_step_budget_and_emits_budget_exhausted(monkeypatch):
+    # With a budget of 1, the loop may attempt exactly one runner. When the first
+    # runner fails the loop must NOT hand off to the next runner; instead it
+    # emits a `budget_exhausted` trace event and stops. This is the deterministic
+    # guard against unbounded handoff loops (issue #27).
+    import orchestrator.server as server
+
+    monkeypatch.setattr(settings, "llm_provider", "ollama")
+    monkeypatch.setattr(settings, "max_runner_steps", 1)
+
+    calls = {"agno": 0}
+
+    def fail_agno(*args, **kwargs):
+        calls["agno"] += 1
+        raise RuntimeError("agno boom")
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("budget should have stopped the loop before this runner")
+
+    monkeypatch.setattr(server, "ask_agno_team", fail_agno)
+    monkeypatch.setattr(server, "ask_ollama_direct", must_not_run)
+    monkeypatch.setattr(server, "ask_ollama_cli", must_not_run)
+
+    events: list[dict] = []
+    answer = server.run_orchestrator("write some docs about python", ["docs"], events)
+
+    # Exactly one runner was attempted before the budget stopped the loop.
+    started = [e["data"]["runner"] for e in events if e["event"] == "runner_start"]
+    assert started == ["AGNO Team"]
+    assert calls["agno"] == 1
+
+    # A budget_exhausted event was emitted recording the cap, and the run stopped.
+    budget_events = [e for e in events if e["event"] == "budget_exhausted"]
+    assert len(budget_events) == 1
+    assert budget_events[0]["data"]["budget"] == 1
+    assert budget_events[0]["data"]["steps"] == 1
+    # The loop did not continue to later runners after the budget was hit.
+    assert "budget exhausted" in answer.lower()
+
+
 def test_models_api_parses_ollama_tags(monkeypatch):
     import orchestrator.server as server
 

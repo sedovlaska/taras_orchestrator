@@ -440,7 +440,33 @@ def run_orchestrator(
     if settings.llm_provider != "openai":
         runners.append(("Ollama direct", lambda: ask_ollama_direct(message, model)))
         runners.append(("Ollama CLI", lambda: ask_ollama_cli(message, model)))
-    for label, runner in runners:
+    # Deterministic handoff/step budget: a run may attempt at most
+    # settings.max_runner_steps runner transitions. This caps unbounded handoff
+    # loops (the top multi-agent failure mode) regardless of provider. When the
+    # cap is hit we emit a `budget_exhausted` trace event and stop gracefully
+    # rather than continuing to the next runner.
+    budget = max(1, settings.max_runner_steps)
+    for step, (label, runner) in enumerate(runners, start=1):
+        if step > budget:
+            print(f"BUDGET_EXHAUSTED steps={step - 1} budget={budget}", flush=True)
+            if events is not None:
+                events.append(
+                    {
+                        "event": "budget_exhausted",
+                        "data": {
+                            "steps": step - 1,
+                            "budget": budget,
+                            "message": (
+                                f"Handoff/step budget exhausted after {step - 1} runner steps "
+                                f"(budget {budget}); stopping."
+                            ),
+                        },
+                    }
+                )
+            errors.append(
+                f"Handoff/step budget exhausted after {step - 1} runner steps (budget {budget})."
+            )
+            break
         if events is not None:
             events.append({"event": "runner_start", "data": {"runner": label}})
         try:
