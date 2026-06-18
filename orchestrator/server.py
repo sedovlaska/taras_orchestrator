@@ -40,6 +40,7 @@ conversation_store = ConversationStore.from_settings()
 class ChatRequest(BaseModel):
     message: str
     conversation_id: str | None = None
+    model: str | None = None
 
 
 class ConversationCreateRequest(BaseModel):
@@ -81,6 +82,27 @@ class ContextPackRequest(BaseModel):
 
 def route_agents(message: str) -> list[str]:
     return route_request(message).agents
+
+
+_MODEL_TAG_RE = re.compile(r"[A-Za-z0-9._:/-]+")
+
+
+def resolve_model(model: str | None) -> str | None:
+    """Validate an optional per-request model override.
+
+    Returns the cleaned model string, or None to use the configured default.
+    Raises ValueError when a model is supplied but is not a non-empty string,
+    starts with a dash (which ``ollama run`` would parse as a CLI flag), or
+    contains characters outside the ollama tag charset.
+    """
+    if model is None:
+        return None
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("model must be a non-empty string")
+    cleaned = model.strip()
+    if cleaned.startswith("-") or not _MODEL_TAG_RE.fullmatch(cleaned):
+        raise ValueError("model contains invalid characters")
+    return cleaned
 
 
 def conversation_context(conversation_id: str | None, message: str) -> str:
@@ -223,8 +245,8 @@ def _ollama_env_overrides() -> dict[str, str]:
     }
 
 
-def ask_agno_team(message: str, agents: list[str]) -> str:
-    print(f"AGNO_TEAM_START agents={agents!r} message={message!r}", flush=True)
+def ask_agno_team(message: str, agents: list[str], model: str | None = None) -> str:
+    print(f"AGNO_TEAM_START agents={agents!r} model={model!r} message={message!r}", flush=True)
     code = r'''
 import asyncio
 import json
@@ -233,13 +255,14 @@ from orchestrator.agno_agents import create_orchestrator
 
 message = sys.argv[1]
 target_agents = json.loads(sys.argv[2])
+model = sys.argv[3] or None
 if target_agents and target_agents != ["orchestrator"]:
     message = f"Route this request to these AGNO team members: {target_agents}. User request: {message}"
-resp = create_orchestrator().run(message)
+resp = create_orchestrator(model).run(message)
 print("__AGNO_JSON__" + json.dumps({"content": str(resp.content)}, ensure_ascii=False), flush=True)
 '''
     result = run_command(
-        [sys.executable, "-c", code, message, json.dumps(agents, ensure_ascii=False)],
+        [sys.executable, "-c", code, message, json.dumps(agents, ensure_ascii=False), model or ""],
         cwd=PROJECT_ROOT,
         timeout_seconds=180,
         env_overrides=_ollama_env_overrides(),
@@ -258,11 +281,12 @@ print("__AGNO_JSON__" + json.dumps({"content": str(resp.content)}, ensure_ascii=
     raise RuntimeError(details or "AGNO Team returned an empty response")
 
 
-def ask_ollama_direct(message: str) -> str:
-    print(f"OLLAMA_DIRECT_START message={message!r}", flush=True)
+def ask_ollama_direct(message: str, model: str | None = None) -> str:
+    model = model or settings.llm_model
+    print(f"OLLAMA_DIRECT_START model={model!r} message={message!r}", flush=True)
     url = f"{settings.ollama_host.rstrip('/')}/api/chat"
     payload = {
-        "model": settings.llm_model,
+        "model": model,
         "messages": [
             {
                 "role": "system",
@@ -293,13 +317,14 @@ def _clean_cli_output(text: str) -> str:
     return text.strip()
 
 
-def ask_ollama_cli(message: str) -> str:
-    print(f"OLLAMA_CLI_START command='ollama run {settings.llm_model} --hidethinking --think=false --nowordwrap <message>'", flush=True)
+def ask_ollama_cli(message: str, model: str | None = None) -> str:
+    model = model or settings.llm_model
+    print(f"OLLAMA_CLI_START command='ollama run {model} --hidethinking --think=false --nowordwrap <message>'", flush=True)
     result = run_command(
         [
             "ollama",
             "run",
-            settings.llm_model,
+            model,
             "--hidethinking",
             "--think=false",
             "--nowordwrap",
@@ -345,19 +370,20 @@ def run_orchestrator(
     message: str,
     route: RoutingResult | list[str],
     events: list[RunEvent] | None = None,
+    model: str | None = None,
 ) -> str:
     errors = []
     agents = route.agents if isinstance(route, RoutingResult) else route
     for label, runner in (
-        ("AGNO Team", lambda: ask_agno_team(message, agents)),
+        ("AGNO Team", lambda: ask_agno_team(message, agents, model)),
         (
             "Local system",
             lambda: system_status(events)
             if should_use_local_system_status(message)
             else _skip_non_system(),
         ),
-        ("Ollama direct", lambda: ask_ollama_direct(message)),
-        ("Ollama CLI", lambda: ask_ollama_cli(message)),
+        ("Ollama direct", lambda: ask_ollama_direct(message, model)),
+        ("Ollama CLI", lambda: ask_ollama_cli(message, model)),
     ):
         if events is not None:
             events.append({"event": "runner_start", "data": {"runner": label}})
@@ -378,6 +404,30 @@ def run_orchestrator(
             print(f"{label.upper().replace(' ', '_')}_FALLBACK error={str(exc)!r}", flush=True)
 
     return _friendly_model_error("; ".join(errors))
+
+def list_ollama_models() -> dict:
+    """List locally available Ollama models via /api/tags.
+
+    Degrades gracefully: if Ollama is unreachable, returns an empty model list
+    with reachable=False plus the configured default model.
+    """
+    url = f"{settings.ollama_host.rstrip('/')}/api/tags"
+    request = urllib.request.Request(url, method="GET")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=5) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        models = [model["name"] for model in body.get("models", []) if model.get("name")]
+        return {"models": models, "default_model": settings.llm_model, "reachable": True}
+    except Exception as exc:
+        print(f"OLLAMA_TAGS_FAILED error={str(exc)!r}", flush=True)
+        return {"models": [], "default_model": settings.llm_model, "reachable": False}
+
+
+@app.get("/models")
+async def models():
+    return list_ollama_models()
+
 
 @app.get("/health")
 async def health():
@@ -632,7 +682,7 @@ async def resume_run(run_id: str):
     resume_event = {"event": "resume", "data": {"run_id": run_id}}
     run_history.append_event(run_id, "resume", resume_event["data"])
     events: list[RunEvent] = []
-    answer = run_orchestrator(run["message"], run["agents"], events)
+    answer = run_orchestrator(run["message"], run["agents"], events, model=run["model"])
     record_events(run_id, events)
     done_data = {
         "answer": answer,
@@ -692,9 +742,15 @@ async def chat(request: ChatRequest):
     conversation_id = request.conversation_id
     if conversation_id and conversation_store.get_conversation(conversation_id) is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    try:
+        model = resolve_model(request.model)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     team_input = conversation_context(conversation_id, request.message)
     route = route_request(request.message)
-    run = run_history.create_run(request.message, route.as_dict(), conversation_id=conversation_id)
+    run = run_history.create_run(
+        request.message, route.as_dict(), conversation_id=conversation_id, model=model
+    )
     if conversation_id:
         conversation_store.append_message(conversation_id, "user", request.message)
     initial_events = initial_run_events(route)
@@ -712,7 +768,7 @@ async def chat(request: ChatRequest):
             run_id=run["id"],
         )
     events: list[RunEvent] = []
-    answer = run_orchestrator(team_input, route, events)
+    answer = run_orchestrator(team_input, route, events, model)
     record_events(run["id"], events)
     if conversation_id:
         conversation_store.append_message(conversation_id, "assistant", answer)
@@ -737,11 +793,17 @@ async def chat_stream(request: ChatRequest):
     conversation_id = request.conversation_id
     if conversation_id and conversation_store.get_conversation(conversation_id) is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    try:
+        model = resolve_model(request.model)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     async def event_generator():
         team_input = conversation_context(conversation_id, request.message)
         route = route_request(request.message)
-        run = run_history.create_run(request.message, route.as_dict(), conversation_id=conversation_id)
+        run = run_history.create_run(
+            request.message, route.as_dict(), conversation_id=conversation_id, model=model
+        )
         if conversation_id:
             conversation_store.append_message(conversation_id, "user", request.message)
         initial_events = initial_run_events(route)
@@ -771,7 +833,7 @@ async def chat_stream(request: ChatRequest):
             return
         await asyncio.sleep(0.05)
         events: list[RunEvent] = []
-        answer = await asyncio.to_thread(run_orchestrator, team_input, route, events)
+        answer = await asyncio.to_thread(run_orchestrator, team_input, route, events, model)
         if conversation_id:
             conversation_store.append_message(conversation_id, "assistant", answer)
         for event in events:

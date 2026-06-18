@@ -53,7 +53,8 @@ class RunHistoryStore:
                 intent TEXT NOT NULL,
                 agents_json TEXT NOT NULL,
                 route_json TEXT NOT NULL,
-                conversation_id TEXT
+                conversation_id TEXT,
+                model TEXT
             );
 
             CREATE TABLE IF NOT EXISTS run_events (
@@ -87,8 +88,16 @@ class RunHistoryStore:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
         if "conversation_id" not in columns:
             conn.execute("ALTER TABLE runs ADD COLUMN conversation_id TEXT")
+        if "model" not in columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN model TEXT")
 
-    def create_run(self, message: str, route: dict, conversation_id: str | None = None) -> dict:
+    def create_run(
+        self,
+        message: str,
+        route: dict,
+        conversation_id: str | None = None,
+        model: str | None = None,
+    ) -> dict:
         run_id = str(uuid4())
         now = utc_now()
         agents = route.get("agents", [])
@@ -96,8 +105,8 @@ class RunHistoryStore:
             conn.execute(
                 """
                 INSERT INTO runs
-                    (id, created_at, updated_at, status, message, answer, intent, agents_json, route_json, conversation_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, created_at, updated_at, status, message, answer, intent, agents_json, route_json, conversation_id, model)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -110,6 +119,7 @@ class RunHistoryStore:
                     json.dumps(agents, ensure_ascii=False),
                     json.dumps(route, ensure_ascii=False),
                     conversation_id,
+                    model,
                 ),
             )
         return {
@@ -123,6 +133,7 @@ class RunHistoryStore:
             "agents": agents,
             "route": route,
             "conversation_id": conversation_id,
+            "model": model,
         }
 
     def append_event(self, run_id: str, event: str, data: dict) -> dict:
@@ -352,7 +363,7 @@ class RunHistoryStore:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, created_at, updated_at, status, message, answer, intent, agents_json, route_json
+                SELECT id, created_at, updated_at, status, message, answer, intent, agents_json, route_json, model
                 FROM runs
                 WHERE id = ?
                 """,
@@ -386,6 +397,7 @@ class RunHistoryStore:
         }
         if include_route:
             data["route"] = json.loads(row["route_json"])
+            data["model"] = row["model"]
         return data
 
     def _event_from_row(self, row: sqlite3.Row) -> dict:
