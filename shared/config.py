@@ -13,6 +13,13 @@ class Settings(BaseSettings):
     tool_approval_required_risks: str = "medium,high"
     tool_approval_ttl_seconds: int = 600
     run_history_db_path: str = ".data/run_history.sqlite3"
+    command_allowed_executables: str = "python,ollama,ruff,pytest,docker"
+    command_output_max_chars: int = 12000
+    command_env_allowlist: str = (
+        "PATH,Path,PATHEXT,SYSTEMROOT,SystemRoot,WINDIR,COMSPEC,ComSpec,"
+        "TEMP,TMP,HOME,USERPROFILE,LOCALAPPDATA,APPDATA,"
+        "PYTHONPATH,OLLAMA_HOST,NO_PROXY,no_proxy,PYTHONIOENCODING"
+    )
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 

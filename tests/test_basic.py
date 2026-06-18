@@ -1,8 +1,10 @@
 import json
+import sys
 
 import pytest
 from fastapi.testclient import TestClient
 
+from orchestrator.command_runner import command_env, run_command
 from orchestrator.policy import ToolPolicy
 from orchestrator.run_history import RunHistoryStore
 from orchestrator.routing import route_request
@@ -63,6 +65,36 @@ def test_policy_blocks_project_path_escape():
 
     with pytest.raises(PermissionError):
         policy.require_project_path("../outside")
+
+
+def test_command_runner_executes_allowed_command_and_truncates_output():
+    result = run_command(
+        [sys.executable, "-c", "print('x' * 100)"],
+        timeout_seconds=10,
+        max_output_chars=40,
+    )
+
+    assert result.ok is True
+    assert result.returncode == 0
+    assert "[truncated" in result.stdout
+    assert result.cwd.endswith("taras_orchestrator")
+
+
+def test_command_runner_blocks_unapproved_executables(monkeypatch):
+    monkeypatch.setattr(settings, "command_allowed_executables", "python")
+
+    with pytest.raises(PermissionError):
+        run_command(["definitely-not-python"], timeout_seconds=1)
+
+
+def test_command_runner_blocks_cwd_escape(tmp_path):
+    with pytest.raises(PermissionError):
+        run_command([sys.executable, "-c", "print('no')"], cwd=tmp_path, timeout_seconds=1)
+
+
+def test_command_runner_blocks_unapproved_env_vars():
+    with pytest.raises(PermissionError):
+        command_env({"SECRET_TOKEN": "not-allowed"})
 
 
 def test_route_request_returns_structured_policy_context():

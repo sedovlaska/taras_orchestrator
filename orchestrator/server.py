@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
-import subprocess
 import sys
 import urllib.request
 from pathlib import Path
@@ -14,6 +12,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
+from orchestrator.command_runner import run_command
 from orchestrator.policy import current_policy
 from orchestrator.routing import RoutingResult, route_request, should_use_local_system_status
 from orchestrator.run_history import RunHistoryStore
@@ -159,15 +158,13 @@ def system_status(events: list[RunEvent] | None = None) -> str:
     )
 
 
-def _ollama_env() -> dict[str, str]:
-    env = os.environ.copy()
-    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
-        env.pop(key, None)
-    env["NO_PROXY"] = "localhost,127.0.0.1,::1"
-    env["no_proxy"] = "localhost,127.0.0.1,::1"
-    env["OLLAMA_HOST"] = settings.ollama_host
-    env["PYTHONIOENCODING"] = "utf-8"
-    return env
+def _ollama_env_overrides() -> dict[str, str]:
+    return {
+        "NO_PROXY": "localhost,127.0.0.1,::1",
+        "no_proxy": "localhost,127.0.0.1,::1",
+        "OLLAMA_HOST": settings.ollama_host,
+        "PYTHONIOENCODING": "utf-8",
+    }
 
 
 def ask_agno_team(message: str, agents: list[str]) -> str:
@@ -185,20 +182,15 @@ if target_agents and target_agents != ["orchestrator"]:
 resp = create_orchestrator().run(message)
 print("__AGNO_JSON__" + json.dumps({"content": str(resp.content)}, ensure_ascii=False), flush=True)
 '''
-    env = _ollama_env()
-    result = subprocess.run(
+    result = run_command(
         [sys.executable, "-c", code, message, json.dumps(agents, ensure_ascii=False)],
         cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=180,
-        env=env,
+        timeout_seconds=180,
+        env_overrides=_ollama_env_overrides(),
     )
     marker = "__AGNO_JSON__"
     marker_pos = result.stdout.rfind(marker)
-    if result.returncode == 0 and marker_pos != -1:
+    if result.ok and marker_pos != -1:
         payload = json.loads(result.stdout[marker_pos + len(marker):].strip())
         content = payload.get("content", "")
         if content and not _looks_like_model_error(content):
@@ -247,8 +239,7 @@ def _clean_cli_output(text: str) -> str:
 
 def ask_ollama_cli(message: str) -> str:
     print(f"OLLAMA_CLI_START command='ollama run {settings.llm_model} --hidethinking --think=false --nowordwrap <message>'", flush=True)
-    env = _ollama_env()
-    result = subprocess.run(
+    result = run_command(
         [
             "ollama",
             "run",
@@ -258,15 +249,11 @@ def ask_ollama_cli(message: str) -> str:
             "--nowordwrap",
             message,
         ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=180,
-        env=env,
+        timeout_seconds=180,
+        env_overrides=_ollama_env_overrides(),
     )
     output = _clean_cli_output(result.stdout or result.stderr)
-    if result.returncode != 0:
+    if not result.ok:
         print(f"OLLAMA_CLI_FAILED code={result.returncode} output={output!r}", flush=True)
         raise RuntimeError(output or f"ollama CLI failed with code {result.returncode}")
     print("OLLAMA_CLI_SUCCESS", flush=True)
