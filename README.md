@@ -35,6 +35,8 @@ Open `http://localhost:8000`.
 
 - `GET /health` returns runtime status, AGNO framework name, model, and member list.
 - `GET /diagnostics` returns local readiness checks for config, storage, workspace, tools, and model settings.
+- `GET /evals` returns deterministic local evaluation cases.
+- `POST /evals/run` runs local routing and policy evals without calling the model.
 - `GET /tools` returns the typed tool inventory with current policy decisions.
 - `GET /runs` returns recent chat runs from the local audit log.
 - `GET /runs/summary` returns aggregate run analytics for the browser dashboard.
@@ -98,6 +100,13 @@ allowlists, project-root working directories, environment allowlists, timeouts, 
 The `/diagnostics` endpoint performs fast local checks without calling the model: settings sanity,
 tool inventory, readable workspace samples, run-history storage, context-pack storage, and model
 configuration. The browser UI shows the overall status and individual check results.
+
+## Evals
+
+The `/evals/run` endpoint runs deterministic local evals for router and policy behavior. These
+checks cover common routing intents, expected tools, forbidden tools, and confidence floors. They
+are designed to catch regressions in orchestration behavior before a user discovers them through
+manual chat testing.
 
 ## Workspace File Tools
 
