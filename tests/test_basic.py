@@ -1096,6 +1096,182 @@ def test_conversation_context_bounds_transcript_dropping_oldest(tmp_path, monkey
     assert len(prior) <= settings.conversation_context_max_chars
 
 
+def _ai_sdk_frames(text: str) -> list[dict]:
+    """Parse an AI SDK UI-message-stream body into its JSON data parts.
+
+    Skips the literal ``[DONE]`` terminator, returning only the JSON frames.
+    """
+    parts = []
+    for chunk in text.split("\n\n"):
+        chunk = chunk.strip()
+        if not chunk.startswith("data: "):
+            continue
+        body = chunk[len("data: "):]
+        if body == "[DONE]":
+            continue
+        parts.append(json.loads(body))
+    return parts
+
+
+def _patch_stream_orchestrator(server, monkeypatch, chunks):
+    """Replace stream_orchestrator with a network-free async generator."""
+
+    async def fake_stream(message, route, model=None, granted_tools=None):
+        for chunk in chunks:
+            yield chunk
+
+    monkeypatch.setattr(server, "stream_orchestrator", fake_stream)
+
+
+def test_ai_sdk_stream_golden_transcript_contract(tmp_path, monkeypatch):
+    import orchestrator.server as server
+    from orchestrator.ai_sdk_stream import (
+        UI_MESSAGE_STREAM_HEADER,
+        UI_MESSAGE_STREAM_VERSION,
+    )
+
+    monkeypatch.setattr(server, "run_history", RunHistoryStore(tmp_path / "runs.sqlite3"))
+    _patch_stream_orchestrator(
+        server,
+        monkeypatch,
+        [
+            ("text", {"delta": "Hello"}),
+            ("text", {"delta": " world"}),
+            ("done", {"answer": "Hello world"}),
+        ],
+    )
+    client = TestClient(server.app)
+
+    response = client.post("/chat/stream?protocol=ai-sdk", json={"message": "write docs about python"})
+    body = response.text
+
+    assert response.status_code == 200
+    assert "text/event-stream" in response.headers["content-type"]
+    assert response.headers[UI_MESSAGE_STREAM_HEADER] == UI_MESSAGE_STREAM_VERSION
+    # Stream terminates with the literal [DONE] frame.
+    assert body.rstrip().endswith("data: [DONE]")
+
+    parts = _ai_sdk_frames(body)
+    types = [p["type"] for p in parts]
+    # Message framing brackets the whole stream.
+    assert types[0] == "start"
+    assert parts[0]["messageId"]
+    assert types[-1] == "finish"
+    # The expected v5 part vocabulary is present, and nothing foreign appears.
+    assert {"start", "text-start", "text-delta", "text-end", "finish", "data-trace"} <= set(types)
+    assert set(types) <= {
+        "start",
+        "text-start",
+        "text-delta",
+        "text-end",
+        "finish",
+        "data-trace",
+        "data-approval",
+        "error",
+    }
+
+
+def test_ai_sdk_stream_multi_chunk_yields_multiple_text_deltas(tmp_path, monkeypatch):
+    import orchestrator.server as server
+
+    monkeypatch.setattr(server, "run_history", RunHistoryStore(tmp_path / "runs.sqlite3"))
+    _patch_stream_orchestrator(
+        server,
+        monkeypatch,
+        [
+            ("text", {"delta": "a"}),
+            ("text", {"delta": "b"}),
+            ("text", {"delta": "c"}),
+            ("done", {"answer": "abc"}),
+        ],
+    )
+    client = TestClient(server.app)
+
+    parts = _ai_sdk_frames(client.post("/chat/stream?protocol=ai-sdk", json={"message": "write docs about python"}).text)
+
+    deltas = [p["delta"] for p in parts if p["type"] == "text-delta"]
+    assert deltas == ["a", "b", "c"]
+    # Exactly one text block opened and closed.
+    assert [p["type"] for p in parts].count("text-start") == 1
+    assert [p["type"] for p in parts].count("text-end") == 1
+
+
+def test_ai_sdk_stream_governance_event_becomes_data_trace(tmp_path, monkeypatch):
+    import orchestrator.server as server
+
+    monkeypatch.setattr(server, "run_history", RunHistoryStore(tmp_path / "runs.sqlite3"))
+    _patch_stream_orchestrator(
+        server,
+        monkeypatch,
+        [
+            ("trace", {"event": "runner_start", "data": {"runner": "AGNO Team"}}),
+            ("text", {"delta": "ok"}),
+            ("done", {"answer": "ok"}),
+        ],
+    )
+    client = TestClient(server.app)
+
+    parts = _ai_sdk_frames(client.post("/chat/stream?protocol=ai-sdk", json={"message": "write docs about python"}).text)
+
+    traces = [p for p in parts if p["type"] == "data-trace"]
+    # The initial route/classify events plus the runner_start are all transient traces.
+    assert all(p.get("transient") is True for p in traces)
+    events = [p["data"]["event"] for p in traces]
+    assert "route" in events
+    assert "classify" in events
+    assert "runner_start" in events
+
+
+def test_ai_sdk_stream_approval_becomes_data_approval_with_id(tmp_path, monkeypatch):
+    import orchestrator.server as server
+
+    monkeypatch.setattr(server, "run_history", RunHistoryStore(tmp_path / "runs.sqlite3"))
+    # "please lint this code" requires approval for a medium-risk tool, so the
+    # stream must stop at a persistent data-approval part (no text).
+    client = TestClient(server.app)
+
+    response = client.post("/chat/stream?protocol=ai-sdk", json={"message": "please lint this code"})
+    parts = _ai_sdk_frames(response.text)
+
+    approval_parts = [p for p in parts if p["type"] == "data-approval"]
+    assert len(approval_parts) == 1
+    approval = approval_parts[0]
+    # The id is the stable approval id so the part survives a reconnect.
+    assert approval["id"] == approval["data"]["approval_id"]
+    assert approval["data"]["tool_id"] == "code.lint_code"
+    # No text is streamed and the stream still terminates cleanly.
+    assert not any(p["type"] == "text-delta" for p in parts)
+    assert response.text.rstrip().endswith("data: [DONE]")
+
+
+def test_default_stream_path_is_unchanged_without_flag(tmp_path, monkeypatch):
+    import orchestrator.server as server
+    from orchestrator.ai_sdk_stream import UI_MESSAGE_STREAM_HEADER
+
+    monkeypatch.setattr(server, "run_history", RunHistoryStore(tmp_path / "runs.sqlite3"))
+
+    def fake_runner(message, route, events, model=None):
+        events.append({"event": "runner_result", "data": {"runner": "fake", "status": "ok"}})
+        return "done answer"
+
+    monkeypatch.setattr(server, "run_orchestrator", fake_runner)
+    client = TestClient(server.app)
+
+    response = client.post("/chat/stream", json={"message": "cpu status"})
+    body = response.text
+
+    assert response.status_code == 200
+    # The default custom protocol is untouched: native SSE event lines, no AI SDK
+    # header, no [DONE] terminator, no data-* parts.
+    assert UI_MESSAGE_STREAM_HEADER not in response.headers
+    assert "[DONE]" not in body
+    assert "event: route\n" in body
+    assert "event: done\n" in body
+    assert '"answer": "done answer"' in body
+    assert "data-trace" not in body
+    assert "text-delta" not in body
+
+
 async def test_event_queue():
     queue = EventQueue()
     await queue.emit(StreamEvent(event="test", data={"key": "value"}))
