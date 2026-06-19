@@ -6,6 +6,7 @@ import type {
   Diagnostics,
   EvalSuite,
   Health,
+  ModelSettings,
   ModelsResponse,
   RunListItem,
   RunSummary,
@@ -33,6 +34,18 @@ async function jsonRequest<T>(url: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => jsonRequest<Health>("/health"),
   models: () => jsonRequest<ModelsResponse>("/models"),
+  modelSettings: () => jsonRequest<{ settings: ModelSettings }>("/settings/model"),
+  updateModelSettings: (payload: {
+    provider: string;
+    base_url: string;
+    model: string;
+    api_key?: string | null;
+    keep_existing_api_key?: boolean;
+  }) =>
+    jsonRequest<{ settings: ModelSettings }>("/settings/model", {
+      method: "PUT",
+      body: JSON.stringify(payload)
+    }),
   agents: () => jsonRequest<{ agents: AgentStatus[] }>("/agents/status"),
   runs: () => jsonRequest<{ runs: RunListItem[] }>("/runs?limit=30"),
   run: (runId: string) => jsonRequest<{ run: RunListItem }>(`/runs/${encodeURIComponent(runId)}`),

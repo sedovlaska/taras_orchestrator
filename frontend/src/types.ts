@@ -17,6 +17,14 @@ export type ModelsResponse = {
   reachable: boolean;
 };
 
+export type ModelSettings = {
+  provider: "ollama" | "openai" | string;
+  base_url: string;
+  model: string;
+  api_key_set: boolean;
+  api_key_masked?: string | null;
+};
+
 export type AgentStatus = {
   name: string;
   online: boolean;

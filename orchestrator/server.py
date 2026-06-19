@@ -22,6 +22,7 @@ from orchestrator.conversations import ConversationStore
 from orchestrator.diagnostics import build_diagnostics
 from orchestrator.evals import diff_against_baseline, list_eval_cases, run_eval_suite
 from orchestrator.agno_agents import TOOL_GATED_MARKER
+from orchestrator.model_settings import effective_model_settings, model_settings_store
 from orchestrator.ollama import list_ollama_models
 from orchestrator.policy import APPROVAL_GRANTS_ENV, current_policy, warn_if_gate_disabled
 from orchestrator.policy_simulation import (
@@ -62,6 +63,14 @@ class ChatRequest(BaseModel):
 
 class ConversationCreateRequest(BaseModel):
     title: str | None = None
+
+
+class ModelSettingsRequest(BaseModel):
+    provider: str
+    base_url: str = ""
+    api_key: str | None = None
+    keep_existing_api_key: bool = False
+    model: str
 
 
 class ChatResponse(BaseModel):
@@ -277,6 +286,7 @@ def system_status(events: list[RunEvent] | None = None) -> str:
 
 
 def _ollama_env_overrides() -> dict[str, str]:
+    model_settings = effective_model_settings()
     allowlist = {
         key.strip()
         for key in settings.command_env_allowlist.split(",")
@@ -285,20 +295,20 @@ def _ollama_env_overrides() -> dict[str, str]:
     env = {
         "NO_PROXY": "localhost,127.0.0.1,::1",
         "no_proxy": "localhost,127.0.0.1,::1",
-        "OLLAMA_HOST": settings.ollama_host,
+        "OLLAMA_HOST": model_settings.ollama_host,
         "PYTHONIOENCODING": "utf-8",
     }
     optional_env = {
         # The AGNO Team runs in a subprocess; the child re-loads settings from env,
         # so provider selection is passed through when the command env policy permits it.
-        "LLM_PROVIDER": settings.llm_provider,
-        "LLM_MODEL": settings.llm_model,
+        "LLM_PROVIDER": model_settings.provider,
+        "LLM_MODEL": model_settings.model,
     }
-    if settings.llm_provider == "openai":
+    if model_settings.provider == "openai":
         # Thread the OpenAI-compatible credentials to the child. The api key is
         # never logged (run_command does not echo env values).
-        optional_env["OPENAI_BASE_URL"] = settings.openai_base_url
-        optional_env["OPENAI_API_KEY"] = settings.openai_api_key
+        optional_env["OPENAI_BASE_URL"] = model_settings.openai_base_url
+        optional_env["OPENAI_API_KEY"] = model_settings.openai_api_key
     env.update({key: value for key, value in optional_env.items() if key in allowlist})
     return env
 
@@ -372,9 +382,10 @@ print("__AGNO_JSON__" + json.dumps({"content": str(resp.content)}, ensure_ascii=
 
 
 def ask_ollama_direct(message: str, model: str | None = None) -> str:
-    model = model or settings.llm_model
+    model_settings = effective_model_settings()
+    model = model or model_settings.model
     print(f"OLLAMA_DIRECT_START model={model!r} message={message!r}", flush=True)
-    url = f"{settings.ollama_host.rstrip('/')}/api/chat"
+    url = f"{model_settings.ollama_host.rstrip('/')}/api/chat"
     payload = {
         "model": model,
         "messages": [
@@ -407,9 +418,10 @@ def _iter_ollama_direct(message: str, model: str | None = None):
     worker thread so the event loop is never blocked. Each yielded value is a
     non-empty content fragment as the model produces it.
     """
-    model = model or settings.llm_model
+    model_settings = effective_model_settings()
+    model = model or model_settings.model
     print(f"OLLAMA_DIRECT_STREAM_START model={model!r} message={message!r}", flush=True)
-    url = f"{settings.ollama_host.rstrip('/')}/api/chat"
+    url = f"{model_settings.ollama_host.rstrip('/')}/api/chat"
     payload = {
         "model": model,
         "messages": [
@@ -653,7 +665,7 @@ def _clean_cli_output(text: str) -> str:
 
 
 def ask_ollama_cli(message: str, model: str | None = None) -> str:
-    model = model or settings.llm_model
+    model = model or effective_model_settings().model
     print(f"OLLAMA_CLI_START command='ollama run {model} --hidethinking --think=false --nowordwrap <message>'", flush=True)
     result = run_command(
         [
@@ -722,7 +734,7 @@ def run_orchestrator(
     # The direct/CLI fallbacks are Ollama-specific; they are irrelevant (and
     # would fail) when running against an OpenAI-compatible provider, where the
     # AGNO Team path is the one that works.
-    if settings.llm_provider != "openai":
+    if effective_model_settings().provider != "openai":
         runners.append(("Ollama direct", lambda: ask_ollama_direct(message, model)))
         runners.append(("Ollama CLI", lambda: ask_ollama_cli(message, model)))
     for label, runner in runners:
@@ -797,7 +809,7 @@ async def stream_orchestrator(
     runners: list[tuple[str, object]] = [
         ("AGNO Team", lambda: _iter_agno_team_stream(message, agents, model, granted_tools)),
     ]
-    if settings.llm_provider != "openai":
+    if effective_model_settings().provider != "openai":
         runners.append(
             ("Ollama direct", lambda: _aiter_in_thread(lambda: _iter_ollama_direct(message, model))),
         )
@@ -869,14 +881,36 @@ async def models():
     return list_ollama_models()
 
 
+@app.get("/settings/model")
+async def get_model_settings():
+    return {"settings": model_settings_store.public()}
+
+
+@app.put("/settings/model")
+async def update_model_settings(request: ModelSettingsRequest):
+    try:
+        return {
+            "settings": model_settings_store.update(
+                provider=request.provider,
+                base_url=request.base_url,
+                api_key=request.api_key,
+                keep_existing_api_key=request.keep_existing_api_key,
+                model=request.model,
+            )
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.get("/health")
 async def health():
+    model_settings = effective_model_settings()
     return {
         "status": "ok",
         "framework": "agno",
-        "provider": settings.llm_provider,
-        "model": settings.llm_model,
-        "ollama_host": settings.ollama_host,
+        "provider": model_settings.provider,
+        "model": model_settings.model,
+        "ollama_host": model_settings.ollama_host,
         "members": AGNO_MEMBER_NAMES,
         "policy": {
             "mode": settings.tool_policy_mode,
