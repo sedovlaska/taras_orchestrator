@@ -11,10 +11,10 @@ from agno.team import Team
 from agno.tools import tool
 
 from orchestrator.command_runner import run_command
+from orchestrator.model_settings import effective_model_settings
 from orchestrator.policy import ToolApprovalRequired, current_policy
 from orchestrator.tool_registry import AGNO_MEMBER_NAMES
 from orchestrator.workspace import list_workspace_files, read_workspace_file, search_workspace
-from shared.config import settings
 
 LANGUAGE_INSTRUCTION = "Reply in the same language as the user. If the user writes in Russian, reply in Russian."
 __all__ = ["AGNO_MEMBER_NAMES", "create_orchestrator", "TOOL_GATED_MARKER", "gate_tool"]
@@ -64,14 +64,15 @@ def get_model(model_id: str | None = None) -> Model:
     ``OPENAI_API_KEY``. Otherwise it returns the local Ollama model. The
     per-request ``model_id`` override applies to both paths.
     """
-    resolved_id = model_id or settings.llm_model
-    if settings.llm_provider == "openai":
+    model_settings = effective_model_settings()
+    resolved_id = model_id or model_settings.model
+    if model_settings.provider == "openai":
         return OpenAILike(
             id=resolved_id,
-            base_url=settings.openai_base_url or None,
-            api_key=settings.openai_api_key or None,
+            base_url=model_settings.openai_base_url or None,
+            api_key=model_settings.openai_api_key or None,
         )
-    return Ollama(id=resolved_id, host=settings.ollama_host)
+    return Ollama(id=resolved_id, host=model_settings.ollama_host)
 
 
 def create_code_agent(model_id: str | None = None) -> Agent:

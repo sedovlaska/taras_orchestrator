@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from orchestrator.context_packs import ContextPackStore
+from orchestrator.model_settings import effective_model_settings
 from orchestrator.ollama import list_ollama_models
 from orchestrator.run_history import RunHistoryStore
 from orchestrator.tool_registry import tool_inventory
@@ -99,10 +100,11 @@ def _store_check(check_id: str, title: str, path: Path) -> DiagnosticCheck:
 
 
 def _model_config_check() -> DiagnosticCheck:
-    if not settings.llm_model.strip():
+    model_settings = effective_model_settings()
+    if not model_settings.model.strip():
         return DiagnosticCheck("model", "error", "Model config", "LLM_MODEL is empty.")
-    if settings.llm_provider == "openai":
-        if not settings.openai_base_url.startswith(("http://", "https://")):
+    if model_settings.provider == "openai":
+        if not model_settings.openai_base_url.startswith(("http://", "https://")):
             return DiagnosticCheck(
                 "model", "warn", "Model config", "OPENAI_BASE_URL should be an HTTP URL."
             )
@@ -110,15 +112,15 @@ def _model_config_check() -> DiagnosticCheck:
             "model",
             "ok",
             "Model config",
-            f"{settings.llm_model} via OpenAI-compatible endpoint {settings.openai_base_url}.",
+            f"{model_settings.model} via OpenAI-compatible endpoint {model_settings.openai_base_url}.",
         )
-    if not settings.ollama_host.startswith(("http://", "https://")):
+    if not model_settings.ollama_host.startswith(("http://", "https://")):
         return DiagnosticCheck("model", "warn", "Model config", "OLLAMA_HOST should be an HTTP URL.")
     return DiagnosticCheck(
         "model",
         "ok",
         "Model config",
-        f"{settings.llm_model} via {settings.ollama_host}.",
+        f"{model_settings.model} via {model_settings.ollama_host}.",
     )
 
 
@@ -130,8 +132,9 @@ def _ollama_runtime_check(model_lister: Callable[[], dict] = list_ollama_models)
     assertion entirely and instead sanity-checks that the base URL and API key
     are configured.
     """
-    if settings.llm_provider == "openai":
-        if not (settings.openai_base_url and settings.openai_api_key):
+    model_settings = effective_model_settings()
+    if model_settings.provider == "openai":
+        if not (model_settings.openai_base_url and model_settings.openai_api_key):
             return DiagnosticCheck(
                 "ollama_runtime",
                 "warn",
@@ -152,29 +155,29 @@ def _ollama_runtime_check(model_lister: Callable[[], dict] = list_ollama_models)
             "ollama_runtime",
             "error",
             "Ollama runtime",
-            f"Could not query Ollama at {settings.ollama_host}: {exc}",
+            f"Could not query Ollama at {model_settings.ollama_host}: {exc}",
         )
     if not result.get("reachable"):
         return DiagnosticCheck(
             "ollama_runtime",
             "error",
             "Ollama runtime",
-            f"Ollama is unreachable at {settings.ollama_host}. Is `ollama serve` running?",
+            f"Ollama is unreachable at {model_settings.ollama_host}. Is `ollama serve` running?",
         )
     models = result.get("models", [])
-    if settings.llm_model not in models:
+    if model_settings.model not in models:
         return DiagnosticCheck(
             "ollama_runtime",
             "warn",
             "Ollama runtime",
-            f"Ollama is reachable but model '{settings.llm_model}' is not pulled. "
-            f"Run `ollama pull {settings.llm_model}`.",
+            f"Ollama is reachable but model '{model_settings.model}' is not pulled. "
+            f"Run `ollama pull {model_settings.model}`.",
         )
     return DiagnosticCheck(
         "ollama_runtime",
         "ok",
         "Ollama runtime",
-        f"Ollama reachable; model '{settings.llm_model}' is available.",
+        f"Ollama reachable; model '{model_settings.model}' is available.",
     )
 
 

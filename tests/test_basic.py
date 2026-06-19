@@ -1010,6 +1010,67 @@ def test_get_model_returns_openai_compatible_for_openai_provider(monkeypatch):
     assert get_model("anthropic/claude-3.5-sonnet").id == "anthropic/claude-3.5-sonnet"
 
 
+def test_model_settings_store_masks_validates_and_clears_provider_secrets(tmp_path):
+    from orchestrator.model_settings import ModelSettingsStore
+
+    store = ModelSettingsStore(tmp_path / "model_settings.sqlite3")
+    updated = store.update(
+        provider="openai",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-test-1234",
+        model="openai/gpt-4o-mini",
+    )
+
+    assert updated["provider"] == "openai"
+    assert updated["api_key_set"] is True
+    assert updated["api_key_masked"] == "****1234"
+    assert "sk-test" not in str(updated)
+    assert store.get().openai_api_key == "sk-test-1234"
+    with pytest.raises(ValueError):
+        store.update(provider="openai", base_url="", api_key="sk-test", model="gpt")
+
+    cleared = store.update(provider="ollama", model="qwen3:1.7b")
+
+    assert cleared["provider"] == "ollama"
+    assert cleared["base_url"] == ""
+    assert cleared["api_key_set"] is False
+
+
+def test_model_settings_api_updates_effective_provider(tmp_path, monkeypatch):
+    import orchestrator.model_settings as model_settings
+    import orchestrator.server as server
+    from orchestrator.model_settings import ModelSettingsStore
+
+    store = ModelSettingsStore(tmp_path / "model_settings.sqlite3")
+    monkeypatch.setattr(model_settings, "model_settings_store", store)
+    monkeypatch.setattr(server, "model_settings_store", store)
+    client = TestClient(server.app)
+
+    response = client.put(
+        "/settings/model",
+        json={
+            "provider": "openai",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "sk-test-1234",
+            "model": "openai/gpt-4o-mini",
+        },
+    )
+    settings_payload = client.get("/settings/model").json()["settings"]
+    health = client.get("/health").json()
+    models = client.get("/models").json()
+
+    assert response.status_code == 200
+    assert settings_payload["api_key_masked"] == "****1234"
+    assert "sk-test" not in str(settings_payload)
+    assert health["provider"] == "openai"
+    assert health["model"] == "openai/gpt-4o-mini"
+    assert models == {
+        "models": ["openai/gpt-4o-mini"],
+        "default_model": "openai/gpt-4o-mini",
+        "reachable": True,
+    }
+
+
 def test_health_reports_active_provider(monkeypatch):
     import orchestrator.server as server
 

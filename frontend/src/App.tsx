@@ -11,8 +11,10 @@ import {
   Group,
   Indicator,
   Loader,
+  Modal,
   NavLink,
   Paper,
+  PasswordInput,
   Popover,
   ScrollArea,
   Select,
@@ -78,6 +80,7 @@ import type {
   Diagnostics,
   EvalSuite,
   Health,
+  ModelSettings,
   RunListItem,
   RunSummary,
   Runbook,
@@ -569,6 +572,15 @@ export function App() {
   const [defaultModel, setDefaultModel] = useState<string | null>(null);
   const [modelsReachable, setModelsReachable] = useState(true);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [modelSettings, setModelSettings] = useState<ModelSettings | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [settingsForm, setSettingsForm] = useState({
+    provider: "ollama",
+    base_url: "",
+    model: "",
+    api_key: ""
+  });
   const [agents, setAgents] = useState<AgentStatus[]>([]);
   const [activeAgents, setActiveAgents] = useState<string[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>(welcomeMessages);
@@ -606,8 +618,17 @@ export function App() {
 
   async function refreshAll() {
     try {
-      const [healthData, agentData, runData, summaryData, packsData, runbooksData, conversationsData, modelsData] =
-        await Promise.all([
+      const [
+        healthData,
+        agentData,
+        runData,
+        summaryData,
+        packsData,
+        runbooksData,
+        conversationsData,
+        modelsData,
+        modelSettingsData
+      ] = await Promise.all([
           api.health(),
           api.agents(),
           api.runs(),
@@ -615,12 +636,20 @@ export function App() {
           api.contextPacks(),
           api.runbooks(),
           api.conversations(),
-          api.models()
+          api.models(),
+          api.modelSettings()
         ]);
       setHealth(healthData);
       setModels(modelsData.models || []);
       setDefaultModel(modelsData.default_model || null);
       setModelsReachable(modelsData.reachable);
+      setModelSettings(modelSettingsData.settings);
+      setSettingsForm({
+        provider: modelSettingsData.settings.provider || "ollama",
+        base_url: modelSettingsData.settings.base_url || "",
+        model: modelSettingsData.settings.model || modelsData.default_model || "",
+        api_key: ""
+      });
       // Default the picker to the server's default model; keep an explicit
       // user choice if it's still a valid option.
       setSelectedModel((current) =>
@@ -637,6 +666,49 @@ export function App() {
       }
     } catch (error) {
       notifyError(error, "Refresh failed");
+    }
+  }
+
+  async function openModelSettings() {
+    try {
+      const data = await api.modelSettings();
+      setModelSettings(data.settings);
+      setSettingsForm({
+        provider: data.settings.provider || "ollama",
+        base_url: data.settings.base_url || "",
+        model: data.settings.model || defaultModel || "",
+        api_key: ""
+      });
+      setSettingsOpen(true);
+    } catch (error) {
+      notifyError(error, "Settings load failed");
+    }
+  }
+
+  async function saveModelSettings() {
+    setSavingSettings(true);
+    try {
+      const data = await api.updateModelSettings({
+        provider: settingsForm.provider,
+        base_url: settingsForm.base_url,
+        model: settingsForm.model,
+        api_key: settingsForm.api_key || null,
+        keep_existing_api_key: !settingsForm.api_key && Boolean(modelSettings?.api_key_set)
+      });
+      setModelSettings(data.settings);
+      setSettingsForm({
+        provider: data.settings.provider || "ollama",
+        base_url: data.settings.base_url || "",
+        model: data.settings.model || "",
+        api_key: ""
+      });
+      setSettingsOpen(false);
+      notifySuccess("Model settings saved");
+      await refreshAll();
+    } catch (error) {
+      notifyError(error, "Settings save failed");
+    } finally {
+      setSavingSettings(false);
     }
   }
 
@@ -1003,9 +1075,76 @@ export function App() {
                 <IconRefresh size={18} />
               </ActionIcon>
             </Tooltip>
+            <Tooltip label="Model settings">
+              <ActionIcon variant="subtle" onClick={openModelSettings} aria-label="Model settings">
+                <IconSettings size={18} />
+              </ActionIcon>
+            </Tooltip>
           </Group>
         </Group>
       </AppShell.Header>
+
+      <Modal
+        opened={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        title="Model settings"
+        centered
+      >
+        <Stack gap="sm">
+          <Select
+            label="Provider"
+            data={[
+              { value: "ollama", label: "Ollama" },
+              { value: "openai", label: "OpenAI-compatible" }
+            ]}
+            value={settingsForm.provider}
+            allowDeselect={false}
+            onChange={(value) =>
+              setSettingsForm((current) => ({ ...current, provider: value || "ollama" }))
+            }
+          />
+          <TextInput
+            label="Model"
+            value={settingsForm.model}
+            onChange={(event) =>
+              setSettingsForm((current) => ({ ...current, model: event.currentTarget.value }))
+            }
+          />
+          {settingsForm.provider === "openai" ? (
+            <>
+              <TextInput
+                label="Base URL"
+                value={settingsForm.base_url}
+                onChange={(event) =>
+                  setSettingsForm((current) => ({
+                    ...current,
+                    base_url: event.currentTarget.value
+                  }))
+                }
+              />
+              <PasswordInput
+                label="API key"
+                placeholder={modelSettings?.api_key_masked || ""}
+                value={settingsForm.api_key}
+                onChange={(event) =>
+                  setSettingsForm((current) => ({
+                    ...current,
+                    api_key: event.currentTarget.value
+                  }))
+                }
+              />
+            </>
+          ) : null}
+          <Group justify="flex-end" mt="sm">
+            <Button variant="default" onClick={() => setSettingsOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={saveModelSettings} loading={savingSettings}>
+              Save
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
 
       <AppShell.Navbar p="md">
         <ScrollArea h="100%">
