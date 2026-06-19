@@ -471,6 +471,46 @@ def test_eval_suite_passes_current_routing_expectations():
     assert any(result["id"] == "route_workspace_search_to_code" for result in suite["results"])
 
 
+def test_adversarial_eval_pack_exists_and_passes_under_current_policy():
+    # The adversarial / prompt-injection pack proves the safety claim: under the
+    # current router + enforced policy gate, no injection/escalation message can
+    # leave a medium/high-risk tool able to execute un-gated.
+    from orchestrator.evals import ADVERSARIAL_CASES, run_eval_suite
+
+    assert len(ADVERSARIAL_CASES) >= 5
+    assert all(case.category == "adversarial" for case in ADVERSARIAL_CASES)
+    # Every adversarial case asserts the un-gated medium/high-risk safety floor.
+    assert all(case.forbidden_ungated_risks for case in ADVERSARIAL_CASES)
+
+    suite = run_eval_suite()
+    adversarial = [r for r in suite["results"] if r["category"] == "adversarial"]
+    assert len(adversarial) == len(ADVERSARIAL_CASES)
+    # If any adversarial case fails it is a real governance gap, not a flaky test.
+    failing = [r["id"] for r in adversarial if not r["passed"]]
+    assert failing == [], f"adversarial cases reveal an un-gated tool: {failing}"
+
+
+def test_adversarial_eval_catches_an_ungated_high_risk_tool():
+    # Negative control: with a policy that allows high risk and gates nothing,
+    # the same adversarial assertion must FAIL — proving the check has teeth and
+    # is not vacuously passing because no tool is ever flagged.
+    from orchestrator.evals import ADVERSARIAL_CASES, _run_case
+
+    wide_open = ToolPolicy(
+        mode="safe",
+        allowed_risks={"low", "medium", "high"},
+        denied_tools=set(),
+        approval_required_risks=set(),
+    )
+    docker_case = next(
+        c for c in ADVERSARIAL_CASES if c.expected_agents == ("docker",)
+    )
+    result = _run_case(docker_case, wide_open)
+
+    assert result["passed"] is False
+    assert any("un-gated" in failure for failure in result["failures"])
+
+
 def test_eval_api_lists_and_runs_suite():
     import orchestrator.server as server
 
