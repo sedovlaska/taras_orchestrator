@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sys
 
@@ -1094,6 +1095,358 @@ def test_conversation_context_bounds_transcript_dropping_oldest(tmp_path, monkey
     # The bounded prior-transcript portion stays within the configured limit.
     prior = result.split("Prior conversation:\n", 1)[1].split("\n\nCurrent user message:", 1)[0]
     assert len(prior) <= settings.conversation_context_max_chars
+
+
+def _ai_sdk_frames(text: str) -> list[dict]:
+    """Parse an AI SDK UI-message-stream body into its JSON data parts.
+
+    Skips the literal ``[DONE]`` terminator, returning only the JSON frames.
+    """
+    parts = []
+    for chunk in text.split("\n\n"):
+        chunk = chunk.strip()
+        if not chunk.startswith("data: "):
+            continue
+        body = chunk[len("data: "):]
+        if body == "[DONE]":
+            continue
+        parts.append(json.loads(body))
+    return parts
+
+
+def _patch_stream_orchestrator(server, monkeypatch, chunks):
+    """Replace stream_orchestrator with a network-free async generator."""
+
+    async def fake_stream(message, route, model=None, granted_tools=None):
+        for chunk in chunks:
+            yield chunk
+
+    monkeypatch.setattr(server, "stream_orchestrator", fake_stream)
+
+
+def test_ai_sdk_stream_golden_transcript_contract(tmp_path, monkeypatch):
+    import orchestrator.server as server
+    from orchestrator.ai_sdk_stream import (
+        UI_MESSAGE_STREAM_HEADER,
+        UI_MESSAGE_STREAM_VERSION,
+    )
+
+    monkeypatch.setattr(server, "run_history", RunHistoryStore(tmp_path / "runs.sqlite3"))
+    _patch_stream_orchestrator(
+        server,
+        monkeypatch,
+        [
+            ("text", {"delta": "Hello"}),
+            ("text", {"delta": " world"}),
+            ("done", {"answer": "Hello world"}),
+        ],
+    )
+    client = TestClient(server.app)
+
+    response = client.post("/chat/stream?protocol=ai-sdk", json={"message": "write docs about python"})
+    body = response.text
+
+    assert response.status_code == 200
+    assert "text/event-stream" in response.headers["content-type"]
+    assert response.headers[UI_MESSAGE_STREAM_HEADER] == UI_MESSAGE_STREAM_VERSION
+    # Stream terminates with the literal [DONE] frame.
+    assert body.rstrip().endswith("data: [DONE]")
+
+    parts = _ai_sdk_frames(body)
+    types = [p["type"] for p in parts]
+    # Message framing brackets the whole stream.
+    assert types[0] == "start"
+    assert parts[0]["messageId"]
+    assert types[-1] == "finish"
+    # The expected v5 part vocabulary is present, and nothing foreign appears.
+    assert {"start", "text-start", "text-delta", "text-end", "finish", "data-trace"} <= set(types)
+    assert set(types) <= {
+        "start",
+        "text-start",
+        "text-delta",
+        "text-end",
+        "finish",
+        "data-trace",
+        "data-approval",
+        "error",
+    }
+
+
+def test_ai_sdk_stream_multi_chunk_yields_multiple_text_deltas(tmp_path, monkeypatch):
+    import orchestrator.server as server
+
+    monkeypatch.setattr(server, "run_history", RunHistoryStore(tmp_path / "runs.sqlite3"))
+    _patch_stream_orchestrator(
+        server,
+        monkeypatch,
+        [
+            ("text", {"delta": "a"}),
+            ("text", {"delta": "b"}),
+            ("text", {"delta": "c"}),
+            ("done", {"answer": "abc"}),
+        ],
+    )
+    client = TestClient(server.app)
+
+    parts = _ai_sdk_frames(client.post("/chat/stream?protocol=ai-sdk", json={"message": "write docs about python"}).text)
+
+    deltas = [p["delta"] for p in parts if p["type"] == "text-delta"]
+    assert deltas == ["a", "b", "c"]
+    # Exactly one text block opened and closed.
+    assert [p["type"] for p in parts].count("text-start") == 1
+    assert [p["type"] for p in parts].count("text-end") == 1
+
+
+def test_ai_sdk_stream_governance_event_becomes_data_trace(tmp_path, monkeypatch):
+    import orchestrator.server as server
+
+    monkeypatch.setattr(server, "run_history", RunHistoryStore(tmp_path / "runs.sqlite3"))
+    _patch_stream_orchestrator(
+        server,
+        monkeypatch,
+        [
+            ("trace", {"event": "runner_start", "data": {"runner": "AGNO Team"}}),
+            ("text", {"delta": "ok"}),
+            ("done", {"answer": "ok"}),
+        ],
+    )
+    client = TestClient(server.app)
+
+    parts = _ai_sdk_frames(client.post("/chat/stream?protocol=ai-sdk", json={"message": "write docs about python"}).text)
+
+    traces = [p for p in parts if p["type"] == "data-trace"]
+    # The initial route/classify events plus the runner_start are all transient traces.
+    assert all(p.get("transient") is True for p in traces)
+    events = [p["data"]["event"] for p in traces]
+    assert "route" in events
+    assert "classify" in events
+    assert "runner_start" in events
+
+
+def test_ai_sdk_stream_approval_becomes_data_approval_with_id(tmp_path, monkeypatch):
+    import orchestrator.server as server
+
+    monkeypatch.setattr(server, "run_history", RunHistoryStore(tmp_path / "runs.sqlite3"))
+    # "please lint this code" requires approval for a medium-risk tool, so the
+    # stream must stop at a persistent data-approval part (no text).
+    client = TestClient(server.app)
+
+    response = client.post("/chat/stream?protocol=ai-sdk", json={"message": "please lint this code"})
+    parts = _ai_sdk_frames(response.text)
+
+    approval_parts = [p for p in parts if p["type"] == "data-approval"]
+    assert len(approval_parts) == 1
+    approval = approval_parts[0]
+    # The id is the stable approval id so the part survives a reconnect.
+    assert approval["id"] == approval["data"]["approval_id"]
+    assert approval["data"]["tool_id"] == "code.lint_code"
+    # No text is streamed and the stream still terminates cleanly.
+    assert not any(p["type"] == "text-delta" for p in parts)
+    assert response.text.rstrip().endswith("data: [DONE]")
+
+
+def test_default_stream_path_is_unchanged_without_flag(tmp_path, monkeypatch):
+    import orchestrator.server as server
+    from orchestrator.ai_sdk_stream import UI_MESSAGE_STREAM_HEADER
+
+    monkeypatch.setattr(server, "run_history", RunHistoryStore(tmp_path / "runs.sqlite3"))
+
+    def fake_runner(message, route, events, model=None):
+        events.append({"event": "runner_result", "data": {"runner": "fake", "status": "ok"}})
+        return "done answer"
+
+    monkeypatch.setattr(server, "run_orchestrator", fake_runner)
+    client = TestClient(server.app)
+
+    response = client.post("/chat/stream", json={"message": "cpu status"})
+    body = response.text
+
+    assert response.status_code == 200
+    # The default custom protocol is untouched: native SSE event lines, no AI SDK
+    # header, no [DONE] terminator, no data-* parts.
+    assert UI_MESSAGE_STREAM_HEADER not in response.headers
+    assert "[DONE]" not in body
+    assert "event: route\n" in body
+    assert "event: done\n" in body
+    assert '"answer": "done answer"' in body
+    assert "data-trace" not in body
+    assert "text-delta" not in body
+
+
+class _FakeStdout:
+    """A StreamReader stand-in whose ``readline`` emits queued lines then stalls.
+
+    Once the queued lines are exhausted it never returns (simulating a wedged
+    child / half-open upstream), which is exactly what the wall-clock deadline
+    must protect against.
+    """
+
+    def __init__(self, lines, *, stall_forever=True):
+        self._lines = list(lines)
+        self._stall_forever = stall_forever
+
+    async def readline(self):
+        if self._lines:
+            return self._lines.pop(0)
+        if self._stall_forever:
+            await asyncio.Event().wait()  # block until cancelled by wait_for
+        return b""  # EOF
+
+    async def read(self):
+        return b""
+
+
+class _FakeProc:
+    def __init__(self, stdout, *, returncode_after_wait=0, stderr_bytes=b""):
+        self.stdout = stdout
+        self.stderr = _make_stderr_reader(stderr_bytes)
+        self.returncode = None
+        self._returncode_after_wait = returncode_after_wait
+        self.killed = False
+        self._waited = False
+
+    async def wait(self):
+        # Settle to the configured exit code once the reader loop is done.
+        self.returncode = self._returncode_after_wait
+        self._waited = True
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+
+def _make_stderr_reader(payload):
+    reader = _FakeStdout([], stall_forever=False)
+
+    async def _read():
+        return payload
+
+    reader.read = _read
+    return reader
+
+
+async def test_agno_team_stream_kills_child_and_errors_on_deadline(monkeypatch):
+    """A child that stalls past the deadline is killed and the stream raises a
+    well-formed error (which the endpoint turns into an error frame + [DONE])
+    rather than hanging forever."""
+    import orchestrator.server as server
+
+    # One real text delta, then the child stalls forever.
+    stdout = _FakeStdout([b'__AGNO_EV__{"kind": "text", "delta": "hi"}\n'], stall_forever=True)
+    proc = _FakeProc(stdout)
+
+    async def fake_exec(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr(server.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(server, "_AGNO_STREAM_TIMEOUT_SECONDS", 0.2)
+
+    produced = []
+    with pytest.raises(RuntimeError) as excinfo:
+        async for chunk in server._iter_agno_team_stream("hello", ["orchestrator"]):
+            produced.append(chunk)
+
+    assert "timed out" in str(excinfo.value).lower()
+    # The first real delta was forwarded before the stall.
+    assert ("text", {"delta": "hi"}) in produced
+    # The wedged child was killed and reaped in the finally block.
+    assert proc.killed is True
+
+
+async def test_agno_team_stream_deadline_terminates_endpoint_with_done(tmp_path, monkeypatch):
+    """End-to-end: a stalled child does not hang the SSE response; once it has
+    committed (streamed a token) the timeout terminates the stream cleanly with a
+    finish frame + the [DONE] terminator, and the child is killed."""
+    import orchestrator.server as server
+
+    monkeypatch.setattr(server, "run_history", RunHistoryStore(tmp_path / "runs.sqlite3"))
+    monkeypatch.setattr(server, "_AGNO_STREAM_TIMEOUT_SECONDS", 0.2)
+    # No-Ollama-fallback so the stalled AGNO path is the only streaming runner.
+    monkeypatch.setattr(server.settings, "llm_provider", "openai")
+
+    # Stream one token (commits the runner) then stall forever.
+    stdout = _FakeStdout([b'__AGNO_EV__{"kind": "text", "delta": "partial"}\n'], stall_forever=True)
+    proc = _FakeProc(stdout)
+
+    async def fake_exec(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr(server.asyncio, "create_subprocess_exec", fake_exec)
+
+    client = TestClient(server.app)
+    response = client.post("/chat/stream?protocol=ai-sdk", json={"message": "write docs about python"})
+    body = response.text
+
+    assert response.status_code == 200
+    # No dangling SSE: the stream terminates with a finish frame and [DONE].
+    assert body.rstrip().endswith("data: [DONE]")
+    parts = _ai_sdk_frames(body)
+    types = [p["type"] for p in parts]
+    assert "finish" in types
+    # The partial token made it through and the wedged child was killed.
+    assert any(p["type"] == "text-delta" and p["delta"] == "partial" for p in parts)
+    assert proc.killed is True
+
+
+async def test_agno_team_stream_caps_cumulative_output(monkeypatch):
+    """Cumulative forwarded stdout is capped at command_output_max_chars rather
+    than streamed unbounded."""
+    import orchestrator.server as server
+
+    monkeypatch.setattr(server.settings, "command_output_max_chars", 50)
+
+    # Far more than the 50-char cap, split across many deltas, then clean EOF.
+    lines = [
+        ('__AGNO_EV__{"kind": "text", "delta": "%s"}\n' % ("x" * 20)).encode()
+        for _ in range(10)
+    ]
+    stdout = _FakeStdout(lines, stall_forever=False)
+    proc = _FakeProc(stdout, returncode_after_wait=0)
+
+    async def fake_exec(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr(server.asyncio, "create_subprocess_exec", fake_exec)
+
+    deltas = []
+    async for kind, payload in server._iter_agno_team_stream("hello", ["orchestrator"]):
+        if kind == "text":
+            deltas.append(payload["delta"])
+
+    forwarded = "".join(deltas)
+    # The model text portion (excluding the truncation notice) never exceeds the cap.
+    notice = "\n...[truncated at 50 chars]"
+    assert notice in forwarded
+    model_text = forwarded[: -len(notice)] if forwarded.endswith(notice) else forwarded.replace(notice, "")
+    assert len(model_text) <= 50
+    # And it stopped well short of the unbounded 200 chars the child emitted.
+    assert len(model_text) < 200
+
+
+async def test_agno_team_stream_caps_stderr_on_failure(monkeypatch):
+    """stderr read on a non-zero exit is truncated, not unbounded, and routed as
+    a RuntimeError (kept out of secrets by _friendly_model_error upstream)."""
+    import orchestrator.server as server
+
+    monkeypatch.setattr(server.settings, "command_output_max_chars", 40)
+
+    stdout = _FakeStdout([], stall_forever=False)
+    proc = _FakeProc(stdout, returncode_after_wait=1)
+    proc.stderr = _make_stderr_reader(("E" * 500).encode())
+
+    async def fake_exec(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr(server.asyncio, "create_subprocess_exec", fake_exec)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        async for _ in server._iter_agno_team_stream("hello", ["orchestrator"]):
+            pass
+
+    msg = str(excinfo.value)
+    assert "truncated" in msg
+    assert len(msg) < 500  # capped well below the 500 raw chars
 
 
 async def test_event_queue():

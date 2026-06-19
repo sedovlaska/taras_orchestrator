@@ -5,14 +5,17 @@ import json
 import re
 import sys
 import urllib.request
+import uuid
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import psutil
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from orchestrator.command_runner import run_command
+from orchestrator import ai_sdk_stream
+from orchestrator.command_runner import command_env, require_project_cwd, run_command
 from orchestrator.context_bundles import build_context_bundle
 from orchestrator.context_packs import ContextPackStore
 from orchestrator.conversations import ConversationStore
@@ -360,6 +363,236 @@ def ask_ollama_direct(message: str, model: str | None = None) -> str:
     return body.get("message", {}).get("content") or body.get("response") or "Ollama returned an empty response."
 
 
+def _iter_ollama_direct(message: str, model: str | None = None):
+    """Stream Ollama /api/chat with ``stream:true``, yielding content deltas.
+
+    This is the synchronous NDJSON reader; ``stream_orchestrator`` drives it in a
+    worker thread so the event loop is never blocked. Each yielded value is a
+    non-empty content fragment as the model produces it.
+    """
+    model = model or settings.llm_model
+    print(f"OLLAMA_DIRECT_STREAM_START model={model!r} message={message!r}", flush=True)
+    url = f"{settings.ollama_host.rstrip('/')}/api/chat"
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a concise helpful assistant. Reply in the user's language.",
+            },
+            {"role": "user", "content": message},
+        ],
+        "stream": True,
+    }
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(request, timeout=120) as response:
+        for raw in response:
+            line = raw.decode("utf-8").strip()
+            if not line:
+                continue
+            chunk = json.loads(line)
+            delta = chunk.get("message", {}).get("content") or chunk.get("response") or ""
+            if delta:
+                yield delta
+    print("OLLAMA_DIRECT_STREAM_SUCCESS", flush=True)
+
+
+# Inner subprocess script for streaming the AGNO Team. It mirrors the buffered
+# ask_agno_team child, but uses arun(stream=True, stream_events=True) and prints
+# one NDJSON line per RunContent delta / tool event so the parent can forward
+# tokens live. The final answer is also re-emitted under __AGNO_JSON__ so the
+# parent can persist a complete answer even when the stream is consumed lazily.
+_AGNO_STREAM_CHILD = r'''
+import asyncio
+import json
+import sys
+from orchestrator.agno_agents import create_orchestrator
+
+message = sys.argv[1]
+target_agents = json.loads(sys.argv[2])
+model = sys.argv[3] or None
+if target_agents and target_agents != ["orchestrator"]:
+    message = f"Route this request to these AGNO team members: {target_agents}. User request: {message}"
+
+
+def emit(obj):
+    sys.stdout.write("__AGNO_EV__" + json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+async def main():
+    parts = []
+    async for ev in create_orchestrator(model).arun(message, stream=True, stream_events=True):
+        name = getattr(ev, "event", "") or ""
+        if name == "RunContent":
+            delta = getattr(ev, "content", None)
+            if isinstance(delta, str) and delta:
+                parts.append(delta)
+                emit({"kind": "text", "delta": delta})
+        elif name == "ToolCallStarted":
+            tool = getattr(ev, "tool", None)
+            tool_name = getattr(tool, "tool_name", None) if tool else None
+            emit({"kind": "tool_start", "tool_id": tool_name or "tool"})
+        elif name == "ToolCallCompleted":
+            tool = getattr(ev, "tool", None)
+            tool_name = getattr(tool, "tool_name", None) if tool else None
+            emit({"kind": "tool_result", "tool_id": tool_name or "tool", "status": "ok"})
+    sys.stdout.write("__AGNO_JSON__" + json.dumps({"content": "".join(parts)}, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+asyncio.run(main())
+'''
+
+
+# Wall-clock bound for the streaming subprocess, matching the buffered
+# ``run_command(..., timeout_seconds=180)`` path in ``ask_ollama_cli``.
+_AGNO_STREAM_TIMEOUT_SECONDS = 180
+
+
+async def _iter_agno_team_stream(
+    message: str,
+    agents: list[str],
+    model: str | None = None,
+    granted_tools: list[str] | None = None,
+) -> AsyncIterator[tuple[str, dict]]:
+    """Stream the AGNO Team subprocess line-by-line.
+
+    Yields ``("text", {"delta": ...})`` for RunContent deltas and
+    ``("trace", {...})`` for tool events.
+
+    This re-applies the full ``run_command`` security envelope, because the live
+    stream needs ``create_subprocess_exec`` rather than the buffered
+    ``subprocess.run`` that ``run_command`` uses. All five guarantees are
+    enforced here: (1) executable allowlist via ``_assert_allowed``,
+    (2) project-scoped cwd via ``require_project_cwd``, (3) env allowlist via
+    ``command_env``, (4) a 180s wall-clock timeout (``_AGNO_STREAM_TIMEOUT_SECONDS``,
+    matching the buffered path) that kills and reaps the child on expiry, and
+    (5) an output cap (``settings.command_output_max_chars``) on both the
+    cumulative forwarded stdout and the stderr read on a non-zero exit.
+    """
+    from orchestrator.command_runner import _assert_allowed, _truncate  # local: security helpers
+
+    args = [sys.executable, "-c", _AGNO_STREAM_CHILD, message, json.dumps(agents, ensure_ascii=False), model or ""]
+    _assert_allowed(args)
+    safe_cwd = require_project_cwd(PROJECT_ROOT)
+    env_overrides = _ollama_env_overrides()
+    if granted_tools:
+        env_overrides[APPROVAL_GRANTS_ENV] = ",".join(granted_tools)
+    env = command_env(env_overrides)
+    max_chars = settings.command_output_max_chars
+
+    print(f"AGNO_STREAM_START agents={agents!r} model={model!r}", flush=True)
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        cwd=str(safe_cwd),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _AGNO_STREAM_TIMEOUT_SECONDS
+    gated: list[dict] = []
+    forwarded_chars = 0  # cumulative text forwarded to the client (output cap)
+    truncated = False
+
+    def _remaining() -> float:
+        left = deadline - loop.time()
+        if left <= 0:
+            raise asyncio.TimeoutError
+        return left
+
+    try:
+        assert proc.stdout is not None
+        while True:
+            try:
+                raw = await asyncio.wait_for(proc.stdout.readline(), timeout=_remaining())
+            except asyncio.TimeoutError:
+                print(
+                    f"AGNO_STREAM_TIMEOUT agents={agents!r} after={_AGNO_STREAM_TIMEOUT_SECONDS}s",
+                    flush=True,
+                )
+                raise RuntimeError(
+                    f"AGNO stream timed out after {_AGNO_STREAM_TIMEOUT_SECONDS}s"
+                ) from None
+            if not raw:  # EOF
+                break
+            line = raw.decode("utf-8", errors="replace").rstrip("\n")
+            idx = line.find("__AGNO_EV__")
+            if idx != -1:
+                try:
+                    ev = json.loads(line[idx + len("__AGNO_EV__"):])
+                except json.JSONDecodeError:
+                    continue
+                kind = ev.get("kind")
+                if kind == "text":
+                    delta = ev.get("delta", "")
+                    if truncated or forwarded_chars >= max_chars:
+                        truncated = True
+                        continue
+                    remaining = max_chars - forwarded_chars
+                    if len(delta) > remaining:
+                        delta = delta[:remaining]
+                        truncated = True
+                    forwarded_chars += len(delta)
+                    if delta:
+                        yield ("text", {"delta": delta})
+                elif kind == "tool_start":
+                    yield ("trace", {"event": "tool_start", "data": {"tool_id": ev.get("tool_id"), "agent": "agno"}})
+                elif kind == "tool_result":
+                    yield (
+                        "trace",
+                        {"event": "tool_result", "data": {"tool_id": ev.get("tool_id"), "agent": "agno", "status": ev.get("status", "ok")}},
+                    )
+                continue
+            gidx = line.find(TOOL_GATED_MARKER)
+            if gidx != -1:
+                try:
+                    gated.append(json.loads(line[gidx + len(TOOL_GATED_MARKER):]))
+                except json.JSONDecodeError:
+                    pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=_remaining())
+        except asyncio.TimeoutError:
+            print(
+                f"AGNO_STREAM_TIMEOUT agents={agents!r} after={_AGNO_STREAM_TIMEOUT_SECONDS}s",
+                flush=True,
+            )
+            raise RuntimeError(
+                f"AGNO stream timed out after {_AGNO_STREAM_TIMEOUT_SECONDS}s"
+            ) from None
+        if truncated:
+            print(f"AGNO_STREAM_TRUNCATED agents={agents!r} cap={max_chars}", flush=True)
+            yield ("text", {"delta": f"\n...[truncated at {max_chars} chars]"})
+        for payload in gated:
+            yield ("trace", {"event": "tool_gated", "data": payload})
+        if proc.returncode != 0:
+            raw_err = (await proc.stderr.read()).decode("utf-8", errors="replace") if proc.stderr else ""
+            err = _truncate(raw_err, max_chars)
+            print(f"AGNO_STREAM_FAILED code={proc.returncode} err={err!r}", flush=True)
+            raise RuntimeError(err.strip() or f"AGNO stream exited with code {proc.returncode}")
+        print(f"AGNO_STREAM_SUCCESS agents={agents!r}", flush=True)
+    finally:
+        # Kill regardless of returncode (a None returncode means the child is
+        # still running, e.g. on timeout/cancellation), then await so it is reaped.
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                await proc.wait()
+            except Exception:  # noqa: BLE001 - best-effort reap
+                pass
+
+
 def _clean_cli_output(text: str) -> str:
     text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
     text = re.sub(r"\r", "", text)
@@ -460,6 +693,116 @@ def run_orchestrator(
             print(f"{label.upper().replace(' ', '_')}_FALLBACK error={str(exc)!r}", flush=True)
 
     return _friendly_model_error("; ".join(errors))
+
+
+async def _aiter_in_thread(sync_gen_factory):
+    """Drive a blocking generator in a worker thread, yielding items as they arrive."""
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    _DONE = object()
+
+    def pump():
+        try:
+            for item in sync_gen_factory():
+                loop.call_soon_threadsafe(queue.put_nowait, ("item", item))
+        except Exception as exc:  # noqa: BLE001 - propagated to the consumer
+            loop.call_soon_threadsafe(queue.put_nowait, ("error", exc))
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, ("done", _DONE))
+
+    task = asyncio.create_task(asyncio.to_thread(pump))
+    try:
+        while True:
+            kind, payload = await queue.get()
+            if kind == "item":
+                yield payload
+            elif kind == "error":
+                raise payload
+            else:
+                break
+    finally:
+        await task
+
+
+async def stream_orchestrator(
+    message: str,
+    route: RoutingResult | list[str],
+    model: str | None = None,
+    granted_tools: list[str] | None = None,
+) -> AsyncIterator[tuple[str, dict]]:
+    """Stream tokens through the runner chain, yielding typed chunks.
+
+    Yields ``("text", {"delta": ...})`` token fragments, ``("trace", {event,
+    data})`` governance/tool events, and a final ``("done", {"answer": ...})``
+    carrying the assembled answer for persistence.
+
+    Honours the no-stream-then-fallback rule: it buffers events from a runner
+    until that runner emits its first token, only then commits to it. A runner
+    that fails before its first token falls through to the next one.
+    """
+    agents = route.agents if isinstance(route, RoutingResult) else route
+
+    runners: list[tuple[str, object]] = [
+        ("AGNO Team", lambda: _iter_agno_team_stream(message, agents, model, granted_tools)),
+    ]
+    if settings.llm_provider != "openai":
+        runners.append(
+            ("Ollama direct", lambda: _aiter_in_thread(lambda: _iter_ollama_direct(message, model))),
+        )
+
+    errors: list[str] = []
+    for label, factory in runners:
+        yield ("trace", {"event": "runner_start", "data": {"runner": label}})
+        committed = False
+        text_parts: list[str] = []
+        pending_traces: list[tuple[str, dict]] = []
+        source = factory()
+        try:
+            # AGNO yields (kind, payload); Ollama yields plain delta strings.
+            async for produced in source:
+                if isinstance(produced, tuple):
+                    kind, payload = produced
+                else:
+                    kind, payload = "text", {"delta": produced}
+                if kind == "trace":
+                    if committed:
+                        yield ("trace", payload)
+                    else:
+                        pending_traces.append(("trace", payload))
+                    continue
+                delta = payload.get("delta", "")
+                if not delta:
+                    continue
+                if not committed:
+                    committed = True
+                    for held in pending_traces:
+                        yield held
+                text_parts.append(delta)
+                yield ("text", {"delta": delta})
+            answer = "".join(text_parts).strip()
+            if committed and answer and not _looks_like_model_error(answer):
+                yield ("trace", {"event": "runner_result", "data": {"runner": label, "status": "ok"}})
+                yield ("done", {"answer": answer})
+                return
+            raise RuntimeError(answer or "runner produced no tokens")
+        except Exception as exc:  # noqa: BLE001 - try the next runner pre-first-token
+            errors.append(f"{label}: {exc}")
+            yield (
+                "trace",
+                {"event": "runner_error", "data": {"runner": label, "message": _friendly_model_error(str(exc))}},
+            )
+            print(f"{label.upper().replace(' ', '_')}_STREAM_FALLBACK error={str(exc)!r}", flush=True)
+            if committed:
+                # Bytes already sent for this runner; cannot fall back further.
+                yield ("done", {"answer": "".join(text_parts).strip()})
+                return
+
+    # No runner streamed; fall back to the buffered runner chain for an answer.
+    fallback_events: list[RunEvent] = []
+    answer = await asyncio.to_thread(run_orchestrator, message, route, fallback_events, model, granted_tools)
+    for event in fallback_events:
+        yield ("trace", {"event": str(event["event"]), "data": dict(event["data"])})
+    yield ("done", {"answer": answer})
 
 
 @app.get("/models")
@@ -833,8 +1176,81 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+async def _ai_sdk_event_generator(request: ChatRequest, model: str | None, conversation_id: str | None):
+    """Emit the run as an AI SDK v5 UI-message-stream (selected by ?protocol=ai-sdk).
+
+    Governance events become TRANSIENT ``data-trace`` parts; ``approval_required``
+    becomes a PERSISTENT ``data-approval`` part keyed by approval id; model output
+    streams as ``text-delta`` frames between ``text-start`` / ``text-end``.
+    """
+    message_id = uuid.uuid4().hex
+    text_id = uuid.uuid4().hex
+    yield ai_sdk_stream.start_frame(message_id)
+    try:
+        team_input = conversation_context(conversation_id, request.message)
+        route = route_request(request.message)
+        run = run_history.create_run(
+            request.message, route.as_dict(), conversation_id=conversation_id, model=model
+        )
+        if conversation_id:
+            conversation_store.append_message(conversation_id, "user", request.message)
+        for event in initial_run_events(route):
+            data = dict(event["data"])
+            run_history.append_event(run["id"], str(event["event"]), data)
+            if event["event"] == "route":
+                data = {**data, "run_id": run["id"]}
+            yield ai_sdk_stream.trace_frame(str(event["event"]), data)
+
+        approvals = create_required_approvals(run["id"], route)
+        if approvals:
+            answer = approval_waiting_answer(approvals)
+            run_history.complete_run(run["id"], answer, status="waiting_approval")
+            for approval in approvals:
+                yield ai_sdk_stream.approval_frame(approval["id"], approval_required_event(approval)["data"])
+            yield ai_sdk_stream.finish_frame()
+            yield ai_sdk_stream.DONE_FRAME
+            return
+
+        text_open = False
+        answer = ""
+        async for kind, payload in stream_orchestrator(team_input, route, model):
+            if kind == "trace":
+                run_history.append_event(run["id"], str(payload["event"]), dict(payload["data"]))
+                yield ai_sdk_stream.trace_frame(str(payload["event"]), dict(payload["data"]))
+            elif kind == "text":
+                if not text_open:
+                    text_open = True
+                    yield ai_sdk_stream.text_start_frame(text_id)
+                yield ai_sdk_stream.text_delta_frame(text_id, payload["delta"])
+            elif kind == "done":
+                answer = payload.get("answer", "")
+        if not text_open and answer:
+            yield ai_sdk_stream.text_start_frame(text_id)
+            yield ai_sdk_stream.text_delta_frame(text_id, answer)
+            text_open = True
+        if text_open:
+            yield ai_sdk_stream.text_end_frame(text_id)
+        if conversation_id:
+            conversation_store.append_message(conversation_id, "assistant", answer)
+        done_data = {
+            "answer": answer,
+            "intent": route.intent,
+            "agents": route.agents,
+            "route": route.as_dict(),
+            "run_id": run["id"],
+        }
+        run_history.append_event(run["id"], "done", done_data)
+        run_history.complete_run(run["id"], answer)
+        yield ai_sdk_stream.trace_frame("done", done_data)
+        yield ai_sdk_stream.finish_frame()
+        yield ai_sdk_stream.DONE_FRAME
+    except Exception as exc:  # noqa: BLE001 - surface as an AI SDK error part
+        yield ai_sdk_stream.error_frame(_friendly_model_error(str(exc)))
+        yield ai_sdk_stream.DONE_FRAME
+
+
 @app.post("/chat/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, http_request: Request):
     conversation_id = request.conversation_id
     if conversation_id and conversation_store.get_conversation(conversation_id) is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -842,6 +1258,18 @@ async def chat_stream(request: ChatRequest):
         model = resolve_model(request.model)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if http_request.query_params.get("protocol") == "ai-sdk":
+        return StreamingResponse(
+            _ai_sdk_event_generator(request, model, conversation_id),
+            media_type="text/event-stream",
+            headers={
+                ai_sdk_stream.UI_MESSAGE_STREAM_HEADER: ai_sdk_stream.UI_MESSAGE_STREAM_VERSION,
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     async def event_generator():
         team_input = conversation_context(conversation_id, request.message)
