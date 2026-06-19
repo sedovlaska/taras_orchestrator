@@ -257,21 +257,29 @@ def system_status(events: list[RunEvent] | None = None) -> str:
 
 
 def _ollama_env_overrides() -> dict[str, str]:
+    allowlist = {
+        key.strip()
+        for key in settings.command_env_allowlist.split(",")
+        if key.strip()
+    }
     env = {
         "NO_PROXY": "localhost,127.0.0.1,::1",
         "no_proxy": "localhost,127.0.0.1,::1",
         "OLLAMA_HOST": settings.ollama_host,
         "PYTHONIOENCODING": "utf-8",
+    }
+    optional_env = {
         # The AGNO Team runs in a subprocess; the child re-loads settings from env,
-        # so the provider selection must be passed through explicitly.
+        # so provider selection is passed through when the command env policy permits it.
         "LLM_PROVIDER": settings.llm_provider,
         "LLM_MODEL": settings.llm_model,
     }
     if settings.llm_provider == "openai":
         # Thread the OpenAI-compatible credentials to the child. The api key is
         # never logged (run_command does not echo env values).
-        env["OPENAI_BASE_URL"] = settings.openai_base_url
-        env["OPENAI_API_KEY"] = settings.openai_api_key
+        optional_env["OPENAI_BASE_URL"] = settings.openai_base_url
+        optional_env["OPENAI_API_KEY"] = settings.openai_api_key
+    env.update({key: value for key, value in optional_env.items() if key in allowlist})
     return env
 
 
@@ -401,6 +409,7 @@ def _iter_ollama_direct(message: str, model: str | None = None):
         method="POST",
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    token_usage: dict[str, int] = {}
     with opener.open(request, timeout=120) as response:
         for raw in response:
             line = raw.decode("utf-8").strip()
@@ -410,6 +419,19 @@ def _iter_ollama_direct(message: str, model: str | None = None):
             delta = chunk.get("message", {}).get("content") or chunk.get("response") or ""
             if delta:
                 yield delta
+            if chunk.get("done"):
+                prompt_tokens = chunk.get("prompt_eval_count")
+                completion_tokens = chunk.get("eval_count")
+                if isinstance(prompt_tokens, int):
+                    token_usage["prompt_tokens"] = prompt_tokens
+                if isinstance(completion_tokens, int):
+                    token_usage["completion_tokens"] = completion_tokens
+                if token_usage:
+                    token_usage["total_tokens"] = token_usage.get("prompt_tokens", 0) + token_usage.get(
+                        "completion_tokens", 0
+                    )
+    if token_usage:
+        yield ("usage", {"token_usage": token_usage})
     print("OLLAMA_DIRECT_STREAM_SUCCESS", flush=True)
 
 
@@ -766,6 +788,7 @@ async def stream_orchestrator(
         committed = False
         text_parts: list[str] = []
         pending_traces: list[tuple[str, dict]] = []
+        token_usage: dict | None = None
         source = factory()
         try:
             # AGNO yields (kind, payload); Ollama yields plain delta strings.
@@ -774,6 +797,9 @@ async def stream_orchestrator(
                     kind, payload = produced
                 else:
                     kind, payload = "text", {"delta": produced}
+                if kind == "usage":
+                    token_usage = payload.get("token_usage") or payload
+                    continue
                 if kind == "trace":
                     if committed:
                         yield ("trace", payload)
@@ -792,7 +818,10 @@ async def stream_orchestrator(
             answer = "".join(text_parts).strip()
             if committed and answer and not _looks_like_model_error(answer):
                 yield ("trace", {"event": "runner_result", "data": {"runner": label, "status": "ok"}})
-                yield ("done", {"answer": answer})
+                done_payload = {"answer": answer}
+                if token_usage:
+                    done_payload["token_usage"] = token_usage
+                yield ("done", done_payload)
                 return
             raise RuntimeError(answer or "runner produced no tokens")
         except Exception as exc:  # noqa: BLE001 - try the next runner pre-first-token
@@ -1233,6 +1262,7 @@ async def _ai_sdk_event_generator(request: ChatRequest, model: str | None, conve
 
         text_open = False
         answer = ""
+        token_usage: dict | None = None
         async for kind, payload in stream_orchestrator(team_input, route, model):
             if kind == "trace":
                 run_history.append_event(run["id"], str(payload["event"]), dict(payload["data"]))
@@ -1244,6 +1274,7 @@ async def _ai_sdk_event_generator(request: ChatRequest, model: str | None, conve
                 yield ai_sdk_stream.text_delta_frame(text_id, payload["delta"])
             elif kind == "done":
                 answer = payload.get("answer", "")
+                token_usage = payload.get("token_usage")
         if not text_open and answer:
             yield ai_sdk_stream.text_start_frame(text_id)
             yield ai_sdk_stream.text_delta_frame(text_id, answer)
@@ -1259,8 +1290,14 @@ async def _ai_sdk_event_generator(request: ChatRequest, model: str | None, conve
             "route": route.as_dict(),
             "run_id": run["id"],
         }
+        if isinstance(token_usage, dict):
+            done_data["token_usage"] = token_usage
         run_history.append_event(run["id"], "done", done_data)
-        run_history.complete_run(run["id"], answer)
+        run_history.complete_run(
+            run["id"],
+            answer,
+            token_usage=token_usage if isinstance(token_usage, dict) else None,
+        )
         yield ai_sdk_stream.trace_frame("done", done_data)
         yield ai_sdk_stream.finish_frame()
         yield ai_sdk_stream.DONE_FRAME

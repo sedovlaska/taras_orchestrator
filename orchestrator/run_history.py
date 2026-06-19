@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,15 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _parse_utc(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _elapsed_ms(start: str, end: str) -> int:
+    elapsed = _parse_utc(end) - _parse_utc(start)
+    return max(0, round(elapsed.total_seconds() * 1000))
 
 
 def resolve_history_path(raw_path: str) -> Path:
@@ -54,7 +64,11 @@ class RunHistoryStore:
                 agents_json TEXT NOT NULL,
                 route_json TEXT NOT NULL,
                 conversation_id TEXT,
-                model TEXT
+                model TEXT,
+                latency_ms INTEGER,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                total_tokens INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS run_events (
@@ -90,6 +104,14 @@ class RunHistoryStore:
             conn.execute("ALTER TABLE runs ADD COLUMN conversation_id TEXT")
         if "model" not in columns:
             conn.execute("ALTER TABLE runs ADD COLUMN model TEXT")
+        if "latency_ms" not in columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN latency_ms INTEGER")
+        if "prompt_tokens" not in columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN prompt_tokens INTEGER")
+        if "completion_tokens" not in columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN completion_tokens INTEGER")
+        if "total_tokens" not in columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN total_tokens INTEGER")
 
     def create_run(
         self,
@@ -134,6 +156,10 @@ class RunHistoryStore:
             "route": route,
             "conversation_id": conversation_id,
             "model": model,
+            "latency_ms": None,
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "total_tokens": None,
         }
 
     def append_event(self, run_id: str, event: str, data: dict) -> dict:
@@ -149,12 +175,48 @@ class RunHistoryStore:
             ).fetchone()
         return self._event_from_row(row)
 
-    def complete_run(self, run_id: str, answer: str, status: str = "completed") -> None:
+    def complete_run(
+        self,
+        run_id: str,
+        answer: str,
+        status: str = "completed",
+        latency_ms: int | None = None,
+        token_usage: dict | None = None,
+    ) -> None:
         now = utc_now()
+        token_usage = token_usage or {}
+        prompt_tokens = _optional_int(token_usage.get("prompt_tokens"))
+        completion_tokens = _optional_int(token_usage.get("completion_tokens"))
+        total_tokens = _optional_int(token_usage.get("total_tokens"))
+        if total_tokens is None and (prompt_tokens is not None or completion_tokens is not None):
+            total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
         with self._connect() as conn:
+            if latency_ms is None:
+                row = conn.execute("SELECT created_at FROM runs WHERE id = ?", (run_id,)).fetchone()
+                if row is not None:
+                    latency_ms = _elapsed_ms(row["created_at"], now)
             conn.execute(
-                "UPDATE runs SET updated_at = ?, status = ?, answer = ? WHERE id = ?",
-                (now, status, answer, run_id),
+                """
+                UPDATE runs
+                SET updated_at = ?,
+                    status = ?,
+                    answer = ?,
+                    latency_ms = ?,
+                    prompt_tokens = COALESCE(?, prompt_tokens),
+                    completion_tokens = COALESCE(?, completion_tokens),
+                    total_tokens = COALESCE(?, total_tokens)
+                WHERE id = ?
+                """,
+                (
+                    now,
+                    status,
+                    answer,
+                    latency_ms,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    run_id,
+                ),
             )
 
     def create_approval(self, run_id: str, decision: dict, ttl_seconds: int) -> dict:
@@ -289,7 +351,20 @@ class RunHistoryStore:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, created_at, updated_at, status, message, answer, intent, agents_json, route_json
+                SELECT
+                    id,
+                    created_at,
+                    updated_at,
+                    status,
+                    message,
+                    answer,
+                    intent,
+                    agents_json,
+                    route_json,
+                    latency_ms,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens
                 FROM runs
                 ORDER BY created_at DESC
                 LIMIT ?
@@ -352,14 +427,28 @@ class RunHistoryStore:
                 LIMIT 500
                 """
             ).fetchall()
+            metrics = conn.execute(
+                """
+                SELECT latency_ms, total_tokens
+                FROM runs
+                WHERE latency_ms IS NOT NULL OR total_tokens IS NOT NULL
+                """
+            ).fetchall()
 
         agent_counts: dict[str, int] = {}
         for row in runs:
             for agent in json.loads(row["agents_json"]):
                 agent_counts[agent] = agent_counts.get(agent, 0) + 1
+        latencies = sorted(
+            int(row["latency_ms"]) for row in metrics if row["latency_ms"] is not None
+        )
+        total_tokens = sum(int(row["total_tokens"]) for row in metrics if row["total_tokens"] is not None)
 
         return {
             "total_runs": totals["count"],
+            "avg_latency_ms": round(sum(latencies) / len(latencies)) if latencies else None,
+            "p95_latency_ms": percentile_nearest_rank(latencies, 95) if latencies else None,
+            "total_tokens": total_tokens,
             "by_status": [{"status": row["status"], "count": row["count"]} for row in status_rows],
             "by_intent": [{"intent": row["intent"], "count": row["count"]} for row in intent_rows],
             "by_agent": [
@@ -385,7 +474,21 @@ class RunHistoryStore:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, created_at, updated_at, status, message, answer, intent, agents_json, route_json, model
+                SELECT
+                    id,
+                    created_at,
+                    updated_at,
+                    status,
+                    message,
+                    answer,
+                    intent,
+                    agents_json,
+                    route_json,
+                    model,
+                    latency_ms,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens
                 FROM runs
                 WHERE id = ?
                 """,
@@ -416,6 +519,10 @@ class RunHistoryStore:
             "answer": row["answer"],
             "intent": row["intent"],
             "agents": json.loads(row["agents_json"]),
+            "latency_ms": row["latency_ms"],
+            "prompt_tokens": row["prompt_tokens"],
+            "completion_tokens": row["completion_tokens"],
+            "total_tokens": row["total_tokens"],
         }
         if include_route:
             data["route"] = json.loads(row["route_json"])
@@ -444,3 +551,19 @@ class RunHistoryStore:
             "risk": row["risk"],
             "reason": row["reason"],
         }
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def percentile_nearest_rank(values: list[int], percentile: int) -> int:
+    if not values:
+        raise ValueError("values must not be empty")
+    rank = math.ceil((percentile / 100) * len(values))
+    return values[min(max(rank, 1), len(values)) - 1]
