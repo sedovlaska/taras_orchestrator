@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +9,8 @@ from shared.config import settings
 
 from .tool_registry import ToolRisk, ToolSpec, get_tool
 
+
+logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
@@ -95,6 +98,32 @@ class ToolPolicy:
             tool.agent,
         )
 
+    def gate_disabled_reason(self) -> str | None:
+        """Return a human reason if the approval gate is effectively off, else None.
+
+        The gate is disabled when policy mode is ``off`` (nothing is gated at
+        all), or when no risk tier requires approval while a risk tier above
+        ``low`` is allowed to run — in that case medium/high-risk tools execute
+        with no approval at all, which is easy to mistake for an active gate.
+        """
+        if self.mode == "off":
+            return "TOOL_POLICY_MODE=off — all tools run with no policy or approval gate"
+        allowed_risks = self.allowed_risks or {ToolRisk.LOW.value}
+        elevated_allowed = allowed_risks - {ToolRisk.LOW.value}
+        if not (self.approval_required_risks or set()) and elevated_allowed:
+            tiers = ", ".join(sorted(elevated_allowed))
+            return (
+                "TOOL_APPROVAL_REQUIRED_RISKS is empty while elevated-risk tiers "
+                f"({tiers}) are allowed — those tools run with no approval gate"
+            )
+        return None
+
+    def warn_if_disabled(self) -> None:
+        """Log a loud WARNING when the approval gate is effectively disabled."""
+        reason = self.gate_disabled_reason()
+        if reason is not None:
+            logger.warning("Tool approval gate is DISABLED: %s", reason)
+
     def require(self, tool_id: str) -> None:
         """Runtime gate at the point a tool actually executes.
 
@@ -103,6 +132,10 @@ class ToolPolicy:
         tool id is present (passed in via ``APPROVAL_GRANTS_ENV``). This is the
         backstop that closes the keyword-prediction bypass — even if the router
         never predicted the tool, it cannot run without a real approval.
+
+        The grant set in ``APPROVAL_GRANTS_ENV`` is trusted only because the
+        subprocess that reads it runs no model-authored code — the model can
+        influence which tool is *called*, never which ids appear in the env.
         """
         tool = get_tool(tool_id)
         decision = self.evaluate(tool)
@@ -125,3 +158,8 @@ class ToolPolicy:
 
 def current_policy() -> ToolPolicy:
     return ToolPolicy.from_settings()
+
+
+def warn_if_gate_disabled() -> None:
+    """Emit the startup WARNING if the current settings disable the gate."""
+    current_policy().warn_if_disabled()
