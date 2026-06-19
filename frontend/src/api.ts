@@ -1,5 +1,6 @@
 import type {
   AgentStatus,
+  ApprovalData,
   Conversation,
   ConversationMessage,
   ContextPack,
@@ -94,6 +95,10 @@ export const api = {
     jsonRequest<{ approval: { tool_id: string; status: string } }>(
       `/approvals/${encodeURIComponent(approvalId)}/${action}`,
       { method: "POST" }
+    ),
+  approvals: (status?: string) =>
+    jsonRequest<{ approvals: ApprovalData[] }>(
+      `/approvals${status ? `?status=${encodeURIComponent(status)}` : ""}`
     ),
   resumeRun: (runId: string) =>
     jsonRequest<{ answer: string; agents_used: string[]; events: TimelineEvent[] }>(

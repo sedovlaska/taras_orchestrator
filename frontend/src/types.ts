@@ -1,6 +1,7 @@
 export type Health = {
   status: string;
   framework: string;
+  provider: string;
   model: string;
   ollama_host: string;
   members: string[];
