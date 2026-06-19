@@ -452,6 +452,11 @@ asyncio.run(main())
 '''
 
 
+# Wall-clock bound for the streaming subprocess, matching the buffered
+# ``run_command(..., timeout_seconds=180)`` path in ``ask_ollama_cli``.
+_AGNO_STREAM_TIMEOUT_SECONDS = 180
+
+
 async def _iter_agno_team_stream(
     message: str,
     agents: list[str],
@@ -461,12 +466,19 @@ async def _iter_agno_team_stream(
     """Stream the AGNO Team subprocess line-by-line.
 
     Yields ``("text", {"delta": ...})`` for RunContent deltas and
-    ``("trace", {...})`` for tool events. The subprocess security envelope from
-    ``run_command`` (executable allowlist, project-scoped cwd, env allowlist) is
-    re-applied here because the live stream needs ``Popen`` rather than the
-    buffered ``subprocess.run`` ``run_command`` uses.
+    ``("trace", {...})`` for tool events.
+
+    This re-applies the full ``run_command`` security envelope, because the live
+    stream needs ``create_subprocess_exec`` rather than the buffered
+    ``subprocess.run`` that ``run_command`` uses. All five guarantees are
+    enforced here: (1) executable allowlist via ``_assert_allowed``,
+    (2) project-scoped cwd via ``require_project_cwd``, (3) env allowlist via
+    ``command_env``, (4) a 180s wall-clock timeout (``_AGNO_STREAM_TIMEOUT_SECONDS``,
+    matching the buffered path) that kills and reaps the child on expiry, and
+    (5) an output cap (``settings.command_output_max_chars``) on both the
+    cumulative forwarded stdout and the stderr read on a non-zero exit.
     """
-    from orchestrator.command_runner import _assert_allowed  # local: security helper
+    from orchestrator.command_runner import _assert_allowed, _truncate  # local: security helpers
 
     args = [sys.executable, "-c", _AGNO_STREAM_CHILD, message, json.dumps(agents, ensure_ascii=False), model or ""]
     _assert_allowed(args)
@@ -475,6 +487,7 @@ async def _iter_agno_team_stream(
     if granted_tools:
         env_overrides[APPROVAL_GRANTS_ENV] = ",".join(granted_tools)
     env = command_env(env_overrides)
+    max_chars = settings.command_output_max_chars
 
     print(f"AGNO_STREAM_START agents={agents!r} model={model!r}", flush=True)
     proc = await asyncio.create_subprocess_exec(
@@ -484,10 +497,33 @@ async def _iter_agno_team_stream(
         stderr=asyncio.subprocess.PIPE,
         env=env,
     )
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _AGNO_STREAM_TIMEOUT_SECONDS
     gated: list[dict] = []
+    forwarded_chars = 0  # cumulative text forwarded to the client (output cap)
+    truncated = False
+
+    def _remaining() -> float:
+        left = deadline - loop.time()
+        if left <= 0:
+            raise asyncio.TimeoutError
+        return left
+
     try:
         assert proc.stdout is not None
-        async for raw in proc.stdout:
+        while True:
+            try:
+                raw = await asyncio.wait_for(proc.stdout.readline(), timeout=_remaining())
+            except asyncio.TimeoutError:
+                print(
+                    f"AGNO_STREAM_TIMEOUT agents={agents!r} after={_AGNO_STREAM_TIMEOUT_SECONDS}s",
+                    flush=True,
+                )
+                raise RuntimeError(
+                    f"AGNO stream timed out after {_AGNO_STREAM_TIMEOUT_SECONDS}s"
+                ) from None
+            if not raw:  # EOF
+                break
             line = raw.decode("utf-8", errors="replace").rstrip("\n")
             idx = line.find("__AGNO_EV__")
             if idx != -1:
@@ -497,7 +533,17 @@ async def _iter_agno_team_stream(
                     continue
                 kind = ev.get("kind")
                 if kind == "text":
-                    yield ("text", {"delta": ev.get("delta", "")})
+                    delta = ev.get("delta", "")
+                    if truncated or forwarded_chars >= max_chars:
+                        truncated = True
+                        continue
+                    remaining = max_chars - forwarded_chars
+                    if len(delta) > remaining:
+                        delta = delta[:remaining]
+                        truncated = True
+                    forwarded_chars += len(delta)
+                    if delta:
+                        yield ("text", {"delta": delta})
                 elif kind == "tool_start":
                     yield ("trace", {"event": "tool_start", "data": {"tool_id": ev.get("tool_id"), "agent": "agno"}})
                 elif kind == "tool_result":
@@ -512,17 +558,39 @@ async def _iter_agno_team_stream(
                     gated.append(json.loads(line[gidx + len(TOOL_GATED_MARKER):]))
                 except json.JSONDecodeError:
                     pass
-        await proc.wait()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=_remaining())
+        except asyncio.TimeoutError:
+            print(
+                f"AGNO_STREAM_TIMEOUT agents={agents!r} after={_AGNO_STREAM_TIMEOUT_SECONDS}s",
+                flush=True,
+            )
+            raise RuntimeError(
+                f"AGNO stream timed out after {_AGNO_STREAM_TIMEOUT_SECONDS}s"
+            ) from None
+        if truncated:
+            print(f"AGNO_STREAM_TRUNCATED agents={agents!r} cap={max_chars}", flush=True)
+            yield ("text", {"delta": f"\n...[truncated at {max_chars} chars]"})
         for payload in gated:
             yield ("trace", {"event": "tool_gated", "data": payload})
         if proc.returncode != 0:
-            err = (await proc.stderr.read()).decode("utf-8", errors="replace") if proc.stderr else ""
+            raw_err = (await proc.stderr.read()).decode("utf-8", errors="replace") if proc.stderr else ""
+            err = _truncate(raw_err, max_chars)
             print(f"AGNO_STREAM_FAILED code={proc.returncode} err={err!r}", flush=True)
             raise RuntimeError(err.strip() or f"AGNO stream exited with code {proc.returncode}")
         print(f"AGNO_STREAM_SUCCESS agents={agents!r}", flush=True)
     finally:
+        # Kill regardless of returncode (a None returncode means the child is
+        # still running, e.g. on timeout/cancellation), then await so it is reaped.
         if proc.returncode is None:
-            proc.kill()
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                await proc.wait()
+            except Exception:  # noqa: BLE001 - best-effort reap
+                pass
 
 
 def _clean_cli_output(text: str) -> str:
