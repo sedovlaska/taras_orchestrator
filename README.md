@@ -133,6 +133,22 @@ checks cover common routing intents, expected tools, forbidden tools, and confid
 are designed to catch regressions in orchestration behavior before a user discovers them through
 manual chat testing.
 
+### Regression baseline
+
+`orchestrator/evals_baseline.json` is a committed, model-free snapshot of the deterministic suite:
+per case it records the outcome (pass/fail) and the salient routed decision (agents + tools).
+Diffing the live suite against it catches **silent routing/policy drift** — a case that flips
+pass to fail, or whose routed agents/tools change between versions.
+
+- `POST /evals/run?compare=baseline` (or `GET /evals/baseline`) runs the suite and reports
+  `regressions` (changed outcomes), `new` (cases not yet in the baseline), and `removed` cases.
+- `python -m orchestrator.evals` exits non-zero if the live suite regresses against the baseline.
+- `python -m orchestrator.evals --update-baseline` deliberately re-blesses the baseline after an
+  intentional routing/policy change. Commit the regenerated JSON with the change.
+
+The pytest gate (`pytest -q`) asserts the committed baseline matches the live suite, so an
+unblessed regression fails CI.
+
 ## Workspace File Tools
 
 The code agent and browser UI can list, preview, and search files under the project root. These

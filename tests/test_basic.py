@@ -523,6 +523,75 @@ def test_eval_api_lists_and_runs_suite():
     assert run.json()["suite"]["failed"] == 0
 
 
+def test_committed_baseline_matches_current_suite_no_regression():
+    # Verification gate: the committed baseline must reflect the live suite. If
+    # routing/policy drift flips a case or changes its routed tools, this fails
+    # and the change must be re-blessed via `python -m orchestrator.evals
+    # --update-baseline` (a deliberate act, not silent drift).
+    from orchestrator.evals import diff_against_baseline, load_baseline
+
+    baseline = load_baseline()
+    report = diff_against_baseline(baseline)
+
+    assert report["regressions"] == [], f"baseline regressions: {report['regressions']}"
+    assert report["removed"] == [], f"cases removed from suite: {report['removed']}"
+    assert report["new"] == [], f"unblessed new cases: {report['new']}"
+    assert report["ok"] is True
+
+
+def test_diff_flags_mutated_case_as_regression_and_unknown_as_new():
+    from orchestrator.evals import build_baseline, diff_against_baseline
+
+    baseline = build_baseline()
+    cases = baseline["cases"]
+
+    # Mutate an existing case's expected outcome -> must surface as a regression.
+    target = "route_lint_to_code_lint"
+    cases[target] = {**cases[target], "passed": False, "tools": ["code.analyze_code"]}
+    # A baseline case the live suite no longer has -> "removed".
+    cases["case_that_no_longer_exists"] = {
+        "category": "routing",
+        "passed": True,
+        "agents": ["code"],
+        "tools": [],
+    }
+
+    report = diff_against_baseline(baseline)
+
+    regressed_ids = [r["id"] for r in report["regressions"]]
+    assert target in regressed_ids
+    assert "case_that_no_longer_exists" in report["removed"]
+    assert report["ok"] is False
+
+
+def test_diff_reports_new_live_case_not_in_baseline_as_new():
+    from orchestrator.evals import build_baseline, diff_against_baseline
+
+    baseline = build_baseline()
+    # Drop a case from the baseline so the live suite has one the baseline lacks.
+    dropped = baseline["cases"].pop("route_docs_to_docs")
+    assert dropped is not None
+
+    report = diff_against_baseline(baseline)
+
+    assert "route_docs_to_docs" in report["new"]
+    # A brand-new live case is "new", never a regression.
+    assert all(r["id"] != "route_docs_to_docs" for r in report["regressions"])
+
+
+def test_eval_api_compare_baseline_reports_no_regression():
+    import orchestrator.server as server
+
+    client = TestClient(server.app)
+    run = client.post("/evals/run", params={"compare": "baseline"})
+    baseline = client.get("/evals/baseline")
+
+    assert run.status_code == 200
+    assert run.json()["diff"]["ok"] is True
+    assert baseline.status_code == 200
+    assert baseline.json()["diff"]["ok"] is True
+
+
 def test_index_exposes_runbook_controls():
     import orchestrator.server as server
 

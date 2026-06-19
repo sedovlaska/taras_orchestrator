@@ -20,7 +20,7 @@ from orchestrator.context_bundles import build_context_bundle
 from orchestrator.context_packs import ContextPackStore
 from orchestrator.conversations import ConversationStore
 from orchestrator.diagnostics import build_diagnostics
-from orchestrator.evals import list_eval_cases, run_eval_suite
+from orchestrator.evals import diff_against_baseline, list_eval_cases, run_eval_suite
 from orchestrator.agno_agents import TOOL_GATED_MARKER
 from orchestrator.ollama import list_ollama_models
 from orchestrator.policy import APPROVAL_GRANTS_ENV, current_policy, warn_if_gate_disabled
@@ -848,8 +848,18 @@ async def evals():
 
 
 @app.post("/evals/run")
-async def run_evals():
+async def run_evals(compare: str | None = None):
+    # `?compare=baseline` runs the suite and diffs it against the committed
+    # baseline snapshot, reporting regressions (pass->fail or routing/tool drift)
+    # and new cases. Without it, the raw suite result is returned as before.
+    if compare == "baseline":
+        return {"diff": diff_against_baseline()}
     return {"suite": run_eval_suite()}
+
+
+@app.get("/evals/baseline")
+async def evals_baseline():
+    return {"diff": diff_against_baseline()}
 
 
 @app.get("/tools")

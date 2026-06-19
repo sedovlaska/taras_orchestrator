@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from orchestrator.policy import ToolPolicy, current_policy
 from orchestrator.routing import route_request
+
+BASELINE_PATH = Path(__file__).with_name("evals_baseline.json")
 
 
 @dataclass(frozen=True)
@@ -209,3 +213,121 @@ def _run_case(case: EvalCase, policy: ToolPolicy | None = None) -> dict[str, obj
         "confidence": route.confidence,
         "reason": route.reason,
     }
+
+
+# --- Baseline + regression diff -------------------------------------------------
+#
+# The baseline is a committed, model-free snapshot of the deterministic suite. For
+# each case we record only the stable outcome (pass/fail) and the salient routed
+# decision (agents + tools). Confidence/reason are intentionally excluded — they
+# are descriptive, not part of the regression contract. Diffing the live suite
+# against the baseline surfaces silent routing/policy drift: a case that flips
+# pass->fail, or whose routed agents/tools change, is a regression; a case present
+# live but absent from the baseline is "new", not a regression.
+
+
+def _outcome(result: dict[str, object]) -> dict[str, object]:
+    """The stable, deterministic slice of a case result used for diffing."""
+    return {
+        "category": result["category"],
+        "passed": result["passed"],
+        "agents": list(result["actual_agents"]),
+        "tools": list(result["actual_tools"]),
+    }
+
+
+def build_baseline() -> dict[str, object]:
+    """Compute a canonical baseline snapshot of the current deterministic suite."""
+    suite = run_eval_suite()
+    cases = {result["id"]: _outcome(result) for result in suite["results"]}
+    return {
+        "version": 1,
+        "total": suite["total"],
+        "cases": dict(sorted(cases.items())),
+    }
+
+
+def load_baseline(path: Path = BASELINE_PATH) -> dict[str, object]:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def write_baseline(path: Path = BASELINE_PATH) -> dict[str, object]:
+    """Regenerate the committed baseline from the current suite (re-bless)."""
+    baseline = build_baseline()
+    Path(path).write_text(
+        json.dumps(baseline, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return baseline
+
+
+def diff_against_baseline(baseline: dict[str, object] | None = None) -> dict[str, object]:
+    """Run the live suite and report regressions/new cases versus the baseline.
+
+    A regression is a baseline case whose live outcome differs (pass->fail or
+    routed agents/tools drifted). A case missing from the baseline is "new", not a
+    regression. A baseline case no longer in the live suite is "removed".
+    """
+    baseline = baseline if baseline is not None else load_baseline()
+    base_cases: dict[str, dict[str, object]] = baseline.get("cases", {})  # type: ignore[assignment]
+    suite = run_eval_suite()
+    live = {result["id"]: _outcome(result) for result in suite["results"]}
+
+    regressions = []
+    for case_id, base in base_cases.items():
+        if case_id not in live:
+            continue
+        current = live[case_id]
+        if current == base:
+            continue
+        changes = []
+        if current["passed"] != base["passed"]:
+            changes.append(f"passed {base['passed']} -> {current['passed']}")
+        if current["agents"] != base["agents"]:
+            changes.append(f"agents {base['agents']} -> {current['agents']}")
+        if current["tools"] != base["tools"]:
+            changes.append(f"tools {base['tools']} -> {current['tools']}")
+        regressions.append({"id": case_id, "changes": changes})
+
+    new_cases = sorted(case_id for case_id in live if case_id not in base_cases)
+    removed_cases = sorted(case_id for case_id in base_cases if case_id not in live)
+
+    return {
+        "ok": not regressions and not removed_cases,
+        "regressions": regressions,
+        "new": new_cases,
+        "removed": removed_cases,
+        "suite": suite,
+    }
+
+
+def _main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="python -m orchestrator.evals")
+    parser.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help="Regenerate and re-bless the committed baseline from the current suite.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.update_baseline:
+        baseline = write_baseline()
+        print(f"Wrote baseline for {baseline['total']} cases to {BASELINE_PATH}")
+        return 0
+
+    report = diff_against_baseline()
+    if report["ok"]:
+        print(f"OK: no regressions vs baseline ({len(report['new'])} new case(s)).")
+        return 0
+    print("REGRESSION vs baseline:")
+    for reg in report["regressions"]:
+        print(f"  {reg['id']}: {'; '.join(reg['changes'])}")
+    for removed in report["removed"]:
+        print(f"  {removed}: removed from suite")
+    return 1
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(_main())
