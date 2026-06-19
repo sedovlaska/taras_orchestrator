@@ -129,6 +129,24 @@ export type Conversation = {
   updated_at: string;
 };
 
+// --- AI SDK v5 UI-message-stream data parts (?protocol=ai-sdk) ---
+// TRANSIENT governance telemetry: `data-trace` parts carry one orchestrator
+// event each (route/classify/policy_decision/runner_*/tool_*/done). Shape
+// mirrors the SSE TimelineEvent payload, with the event name folded into `data`.
+export type TraceData = { event: string } & Record<string, any>;
+
+// PERSISTENT `data-approval` parts, keyed by the stable approval id, mirror the
+// REST approval shape so the approve/deny affordance can hit
+// /approvals/{id}/{action} and resume the owning run.
+export type ApprovalData = {
+  approval_id: string;
+  run_id: string;
+  tool_id: string;
+  agent: string;
+  risk: string;
+  expires_at?: string;
+};
+
 export type ConversationMessage = {
   id: number;
   conversation_id: string;
