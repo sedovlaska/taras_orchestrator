@@ -23,6 +23,10 @@ CI (`.github/workflows/ci.yml`) runs `ruff check .` + `pytest -q` and `npm ci` +
 
 ## Agent skills
 
+### UI implementation standard
+
+For UI work, default to researching established prebuilt components before building custom controls. Prefer shadcn-compatible registries and component libraries already aligned with this app, especially Kibo UI for complex widgets such as trees, file/code viewers, pickers, tables, timelines, and structured editors. Build custom UI only when a suitable maintained component does not exist or when the repo's existing component surface already covers the need.
+
 ### Issue tracker
 
 Issues and PRDs live in this repo's **GitHub Issues**, managed via the `gh` CLI. External PRs are **not** a triage surface. See `docs/agents/issue-tracker.md`.
