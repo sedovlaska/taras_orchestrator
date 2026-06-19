@@ -878,7 +878,7 @@ async def stream_orchestrator(
 
 @app.get("/models")
 async def models():
-    return list_ollama_models()
+    return await asyncio.to_thread(list_ollama_models)
 
 
 @app.get("/settings/model")
@@ -922,7 +922,8 @@ async def health():
 
 @app.get("/diagnostics")
 async def diagnostics():
-    return {"diagnostics": build_diagnostics(run_history, context_pack_store)}
+    diagnostics_result = await asyncio.to_thread(build_diagnostics, run_history, context_pack_store)
+    return {"diagnostics": diagnostics_result}
 
 
 @app.get("/evals")

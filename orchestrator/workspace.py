@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +17,10 @@ IGNORED_DIRS = {
     ".pytest_cache",
     ".ruff_cache",
     ".data",
+    "build",
+    "dist",
+    "node_modules",
+    "static",
     "a2a_agents.egg-info",
 }
 IGNORED_SUFFIXES = {".pyc", ".pyo", ".sqlite3", ".db"}
@@ -111,8 +116,7 @@ def _file_meta(path: Path) -> WorkspaceFile:
     )
 
 
-def iter_workspace_files() -> list[Path]:
-    files: list[Path] = []
+def iter_workspace_files() -> Iterator[Path]:
     for root, dirs, filenames in os.walk(PROJECT_ROOT):
         root_path = Path(root)
         dirs[:] = sorted(
@@ -124,8 +128,7 @@ def iter_workspace_files() -> list[Path]:
             path = root_path / filename
             if _is_ignored(path) or not path.is_file():
                 continue
-            files.append(path)
-    return files
+            yield path
 
 
 def list_workspace_files(limit: int | None = None) -> list[dict[str, object]]:
