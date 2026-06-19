@@ -258,9 +258,31 @@ class RunHistoryStore:
             ).fetchone()
         return self._approval_from_row(updated)
 
+    @staticmethod
+    def _is_expired(approval: dict, now: datetime | None = None) -> bool:
+        now = now or datetime.now(UTC)
+        return datetime.fromisoformat(approval["expires_at"].replace("Z", "+00:00")) < now
+
     def approvals_ready(self, run_id: str) -> bool:
         approvals = self.list_approvals(run_id=run_id)
-        return bool(approvals) and all(approval["status"] == "approved" for approval in approvals)
+        now = datetime.now(UTC)
+        return bool(approvals) and all(
+            approval["status"] == "approved" and not self._is_expired(approval, now)
+            for approval in approvals
+        )
+
+    def granted_tool_ids(self, run_id: str) -> list[str]:
+        """Tool ids whose approval is still both approved and non-expired.
+
+        Re-validates ``expires_at`` at read time so a stale approved grant never
+        outlives ``TOOL_APPROVAL_TTL_SECONDS`` and silently re-enables a tool.
+        """
+        now = datetime.now(UTC)
+        return [
+            approval["tool_id"]
+            for approval in self.list_approvals(run_id=run_id, status="approved")
+            if not self._is_expired(approval, now)
+        ]
 
     def list_runs(self, limit: int = 50) -> list[dict]:
         bounded_limit = min(max(limit, 1), 200)

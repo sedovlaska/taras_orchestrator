@@ -23,7 +23,7 @@ from orchestrator.diagnostics import build_diagnostics
 from orchestrator.evals import list_eval_cases, run_eval_suite
 from orchestrator.agno_agents import TOOL_GATED_MARKER
 from orchestrator.ollama import list_ollama_models
-from orchestrator.policy import APPROVAL_GRANTS_ENV, current_policy
+from orchestrator.policy import APPROVAL_GRANTS_ENV, current_policy, warn_if_gate_disabled
 from orchestrator.routing import RoutingResult, route_request, should_use_local_system_status
 from orchestrator.runbooks import get_runbook, list_runbooks, render_runbook
 from orchestrator.run_history import RunHistoryStore
@@ -41,6 +41,13 @@ RunEvent = dict[str, object]
 run_history = RunHistoryStore.from_settings()
 context_pack_store = ContextPackStore.from_settings()
 conversation_store = ConversationStore.from_settings()
+
+
+@app.on_event("startup")
+async def _warn_on_disabled_gate() -> None:
+    # Surface a misconfigured (effectively off) approval gate loudly, so it is
+    # not mistaken for an active gate.
+    warn_if_gate_disabled()
 
 class ChatRequest(BaseModel):
     message: str
@@ -278,11 +285,13 @@ def _record_gated_tools(stdout: str, events: list[RunEvent] | None) -> None:
     if events is None or TOOL_GATED_MARKER not in stdout:
         return
     for line in stdout.splitlines():
-        idx = line.find(TOOL_GATED_MARKER)
-        if idx == -1:
+        # Honour the marker only at start-of-line. The marker is high-entropy
+        # and gate_tool always emits it on its own line, so tool/model output
+        # that echoes the literal mid-line cannot forge a tool_gated event.
+        if not line.startswith(TOOL_GATED_MARKER):
             continue
         try:
-            payload = json.loads(line[idx + len(TOOL_GATED_MARKER):])
+            payload = json.loads(line[len(TOOL_GATED_MARKER):])
         except json.JSONDecodeError:
             continue
         events.append({"event": "tool_gated", "data": payload})
@@ -552,10 +561,11 @@ async def _iter_agno_team_stream(
                         {"event": "tool_result", "data": {"tool_id": ev.get("tool_id"), "agent": "agno", "status": ev.get("status", "ok")}},
                     )
                 continue
-            gidx = line.find(TOOL_GATED_MARKER)
-            if gidx != -1:
+            # Start-of-line only: the high-entropy marker is unforgeable from
+            # mid-line tool output (see _record_gated_tools).
+            if line.startswith(TOOL_GATED_MARKER):
                 try:
-                    gated.append(json.loads(line[gidx + len(TOOL_GATED_MARKER):]))
+                    gated.append(json.loads(line[len(TOOL_GATED_MARKER):]))
                 except json.JSONDecodeError:
                     pass
         try:
@@ -1063,10 +1073,10 @@ async def resume_run(run_id: str):
 
     resume_event = {"event": "resume", "data": {"run_id": run_id}}
     run_history.append_event(run_id, "resume", resume_event["data"])
-    granted_tools = [
-        approval["tool_id"]
-        for approval in run_history.list_approvals(run_id=run_id, status="approved")
-    ]
+    # TTL is re-validated here: only approvals still within their expires_at
+    # window are threaded into the grant set, so a stale approval cannot
+    # silently defeat TOOL_APPROVAL_TTL_SECONDS at resume time.
+    granted_tools = run_history.granted_tool_ids(run_id)
     events: list[RunEvent] = []
     answer = run_orchestrator(
         run["message"], run["agents"], events, model=run["model"], granted_tools=granted_tools

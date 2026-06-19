@@ -23,7 +23,12 @@ __all__ = ["AGNO_MEMBER_NAMES", "create_orchestrator", "TOOL_GATED_MARKER", "gat
 # point of execution. The parent process scans subprocess stdout for this marker
 # to record a `tool_gated` trace event, since the subprocess cannot reach the
 # run-history store itself.
-TOOL_GATED_MARKER = "__TOOL_GATED__"
+#
+# The marker is a high-entropy token and is only ever honoured at the *start* of
+# a line (see the parent's start-of-line check). gate_tool always prints it on
+# its own line, so model/tool output that merely echoes the literal mid-line --
+# or that lacks the random prefix -- cannot forge a spurious tool_gated event.
+TOOL_GATED_MARKER = "__TOOL_GATED__7f3a1c9e4b6d__"
 
 
 def gate_tool(tool_id: str) -> str | None:
@@ -40,8 +45,11 @@ def gate_tool(tool_id: str) -> str | None:
         current_policy().require(tool_id)
     except ToolApprovalRequired as exc:
         message = str(exc)
+        # Leading newline guarantees the marker starts its own line even if
+        # prior output left the cursor mid-line; the parent only honours the
+        # marker at start-of-line so tool output cannot forge it.
         print(
-            TOOL_GATED_MARKER + json.dumps({"tool_id": tool_id, "reason": message}, ensure_ascii=False),
+            "\n" + TOOL_GATED_MARKER + json.dumps({"tool_id": tool_id, "reason": message}, ensure_ascii=False),
             flush=True,
         )
         return message
