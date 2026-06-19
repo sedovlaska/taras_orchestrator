@@ -28,7 +28,6 @@ import {
   UnstyledButton,
   rem
 } from "@mantine/core";
-import { notifications } from "@mantine/notifications";
 import {
   IconActivity,
   IconAlertTriangle,
@@ -70,6 +69,7 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github-dark.css";
 import { api, streamChat } from "./api";
+import { notifyError, notifyInfo, notifySuccess } from "./lib/notify";
 import type {
   AgentStatus,
   ChatMessage,
@@ -110,14 +110,6 @@ const WELCOME_MESSAGE =
 
 function welcomeMessages(): ChatMessage[] {
   return [{ id: makeId(), role: "system", content: WELCOME_MESSAGE }];
-}
-
-function notifyError(error: unknown, title = "Request failed") {
-  notifications.show({
-    color: "red",
-    title,
-    message: error instanceof Error ? error.message : String(error)
-  });
 }
 
 function formatDate(value?: string) {
@@ -696,7 +688,7 @@ export function App() {
     try {
       const data = await api.contextBundle({ paths: [selectedPath] });
       appendPrompt(data.bundle.prompt_context);
-      notifications.show({ color: "green", title: "Context attached", message: selectedPath });
+      notifySuccess("Context attached", selectedPath);
     } catch (error) {
       notifyError(error, "Context failed");
     }
@@ -707,7 +699,7 @@ export function App() {
     try {
       const data = await api.contextBundle({ query: fileSearch.trim() });
       appendPrompt(data.bundle.prompt_context);
-      notifications.show({ color: "green", title: "Search attached", message: fileSearch });
+      notifySuccess("Search attached", fileSearch);
     } catch (error) {
       notifyError(error, "Context failed");
     }
@@ -783,7 +775,7 @@ export function App() {
     try {
       const data = await api.runTrace(runId);
       setPreview(data.trace.markdown);
-      notifications.show({ color: "blue", title: "Trace loaded", message: "Trace markdown is in Workspace preview." });
+      notifyInfo("Trace loaded", "Trace markdown is in Workspace preview.");
     } catch (error) {
       notifyError(error, "Trace failed");
     }
