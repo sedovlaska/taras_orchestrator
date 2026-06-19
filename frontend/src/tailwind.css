@@ -107,3 +107,11 @@
       sans-serif;
   }
 }
+
+@layer utilities {
+  @media (min-width: 1024px) {
+    .governance-shell {
+      grid-template-columns: 280px minmax(0, 1fr) var(--inspector-width) !important;
+    }
+  }
+}

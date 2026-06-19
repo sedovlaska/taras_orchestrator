@@ -12,6 +12,7 @@ import {
   Activity,
   ArrowDown,
   ArrowUp,
+  BookOpen,
   Bot,
   CheckCircle2,
   ChevronsUpDown,
@@ -35,6 +36,7 @@ import {
   XCircle
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 
 import {
   Conversation as AiConversation,
@@ -71,6 +73,26 @@ import {
   CardHeader,
   CardTitle
 } from "@/components/ui/card";
+import {
+  CodeBlock,
+  CodeBlockBody,
+  CodeBlockContent,
+  CodeBlockCopyButton,
+  CodeBlockFilename,
+  CodeBlockHeader,
+  CodeBlockItem,
+  type BundledLanguage
+} from "@/components/kibo-ui/code-block";
+import {
+  TreeExpander,
+  TreeIcon,
+  TreeLabel,
+  TreeNode,
+  TreeNodeContent,
+  TreeNodeTrigger,
+  TreeProvider,
+  TreeView
+} from "@/components/kibo-ui/tree";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
@@ -80,8 +102,8 @@ import {
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select";
-import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/api";
 import { notifyError, notifySuccess } from "@/lib/notify";
 import type {
@@ -91,6 +113,7 @@ import type {
   Diagnostics,
   EvalSuite,
   Health,
+  ModelSettings,
   ModelsResponse,
   RunListItem,
   RunSummary,
@@ -104,6 +127,17 @@ import { ApprovalCard } from "./ApprovalCard";
 import { RunnerTimeline } from "./RunnerTimeline";
 
 const CHAT_API = "/chat/stream";
+const DEFAULT_INSPECTOR_WIDTH = 560;
+const MIN_INSPECTOR_WIDTH = 460;
+const MAX_INSPECTOR_WIDTH = 860;
+
+type WorkspaceTreeNode = {
+  id: string;
+  name: string;
+  path: string;
+  children: WorkspaceTreeNode[];
+  file?: WorkspaceFile;
+};
 
 function lastUserText(messages: UIMessage[]): string {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -132,6 +166,128 @@ function messagesFromConversation(items: Array<{ id: number; role: string; conte
           parts: [{ type: "text", text: item.content }]
         }) as UIMessage
     );
+}
+
+function buildWorkspaceTree(files: WorkspaceFile[]): WorkspaceTreeNode[] {
+  const roots: WorkspaceTreeNode[] = [];
+
+  for (const file of files) {
+    const parts = file.path.split(/[\\/]+/).filter(Boolean);
+    let siblings = roots;
+    let currentPath = "";
+
+    parts.forEach((part, index) => {
+      currentPath = currentPath ? `${currentPath}/${part}` : part;
+      const isFile = index === parts.length - 1;
+      let node = siblings.find((candidate) => candidate.name === part);
+
+      if (!node) {
+        node = {
+          id: `${isFile ? "file" : "folder"}:${currentPath}`,
+          name: part,
+          path: currentPath,
+          children: []
+        };
+        siblings.push(node);
+      }
+
+      if (isFile) {
+        node.id = `file:${file.path}`;
+        node.path = file.path;
+        node.file = file;
+      }
+
+      siblings = node.children;
+    });
+  }
+
+  const sortNodes = (nodes: WorkspaceTreeNode[]): WorkspaceTreeNode[] =>
+    nodes
+      .sort((left, right) => {
+        const leftIsFolder = left.children.length > 0;
+        const rightIsFolder = right.children.length > 0;
+        if (leftIsFolder !== rightIsFolder) {
+          return leftIsFolder ? -1 : 1;
+        }
+        return left.name.localeCompare(right.name);
+      })
+      .map((node) => ({ ...node, children: sortNodes(node.children) }));
+
+  return sortNodes(roots);
+}
+
+function collectFolderIds(nodes: WorkspaceTreeNode[]): string[] {
+  return nodes.flatMap((node) => [
+    ...(node.children.length ? [node.id] : []),
+    ...collectFolderIds(node.children)
+  ]);
+}
+
+function detectLanguage(path: string): BundledLanguage | undefined {
+  const name = path.toLowerCase();
+  const extension = name.split(".").pop();
+
+  if (name === "dockerfile") return "docker";
+  if (name.endsWith(".md")) return "markdown";
+  if (name.endsWith(".json")) return "json";
+  if (name.endsWith(".toml")) return "toml";
+  if (name.endsWith(".yml") || name.endsWith(".yaml")) return "yaml";
+  if (name.endsWith(".tsx")) return "tsx";
+  if (name.endsWith(".ts")) return "typescript";
+  if (name.endsWith(".jsx")) return "jsx";
+  if (name.endsWith(".js")) return "javascript";
+  if (name.endsWith(".py")) return "python";
+  if (name.endsWith(".css")) return "css";
+  if (name.endsWith(".html")) return "html";
+  if (extension === "env" || name.includes(".env")) return "dotenv";
+  return undefined;
+}
+
+function WorkspaceTreeItems({
+  nodes,
+  level = 0,
+  parentPath = []
+}: {
+  nodes: WorkspaceTreeNode[];
+  level?: number;
+  parentPath?: boolean[];
+}) {
+  return (
+    <>
+      {nodes.map((node, index) => {
+        const hasChildren = node.children.length > 0;
+        const isLast = index === nodes.length - 1;
+
+        return (
+          <TreeNode
+            key={node.id}
+            nodeId={node.id}
+            level={level}
+            isLast={isLast}
+            parentPath={parentPath}
+          >
+            <TreeNodeTrigger className="py-1.5">
+              <TreeExpander hasChildren={hasChildren} />
+              <TreeIcon hasChildren={hasChildren} />
+              <TreeLabel>{node.name}</TreeLabel>
+              {node.file?.matches ? (
+                <Badge variant="outline" className="ml-2 h-5 px-1.5 text-[10px]">
+                  {node.file.matches}
+                </Badge>
+              ) : null}
+            </TreeNodeTrigger>
+            <TreeNodeContent hasChildren={hasChildren}>
+              <WorkspaceTreeItems
+                nodes={node.children}
+                level={level + 1}
+                parentPath={[...parentPath, isLast]}
+              />
+            </TreeNodeContent>
+          </TreeNode>
+        );
+      })}
+    </>
+  );
 }
 
 function Stat({
@@ -170,7 +326,7 @@ function RunsTable({
         header: "Status",
         cell: ({ row }) => (
           <Badge variant={row.original.status === "completed" ? "secondary" : "destructive"}>
-            {row.original.status}
+            <span className="whitespace-nowrap">{row.original.status}</span>
           </Badge>
         )
       },
@@ -219,7 +375,7 @@ function RunsTable({
 
   return (
     <div className="overflow-hidden rounded-md border bg-card">
-      <table className="w-full table-fixed text-sm">
+      <table className="w-full table-auto text-sm">
         <thead className="bg-muted/60 text-xs text-muted-foreground">
           {table.getHeaderGroups().map((headerGroup) => (
             <tr key={headerGroup.id}>
@@ -273,6 +429,13 @@ export function AppNext() {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [health, setHealth] = useState<Health | null>(null);
+  const [modelSettings, setModelSettings] = useState<ModelSettings | null>(null);
+  const [modelForm, setModelForm] = useState({
+    provider: "ollama",
+    model: "",
+    base_url: "",
+    api_key: ""
+  });
   const [runs, setRuns] = useState<RunListItem[]>([]);
   const [summary, setSummary] = useState<RunSummary>({});
   const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
@@ -288,6 +451,9 @@ export function AppNext() {
   const [runbookValues, setRunbookValues] = useState<Record<string, string>>({});
   const [approvalsQueue, setApprovalsQueue] = useState<ApprovalData[]>([]);
   const [dashboardLoading, setDashboardLoading] = useState(false);
+  const [modelSettingsSaving, setModelSettingsSaving] = useState(false);
+  const [inspectorTab, setInspectorTab] = useState("timeline");
+  const [inspectorWidth, setInspectorWidth] = useState(DEFAULT_INSPECTOR_WIDTH);
 
   const [traces, setTraces] = useState<TraceData[]>([]);
   const [approvals, setApprovals] = useState<ApprovalData[]>([]);
@@ -332,6 +498,33 @@ export function AppNext() {
 
   const busy = status === "submitted" || status === "streaming";
   const selectedRunbook = runbooks.find((runbook) => runbook.id === selectedRunbookId) || null;
+  const runbookGroups = useMemo(
+    () =>
+      Array.from(
+        runbooks.reduce((groups, runbook) => {
+          const category = runbook.category || "Runbooks";
+          groups.set(category, [...(groups.get(category) || []), runbook]);
+          return groups;
+        }, new Map<string, Runbook[]>())
+      ).map(([category, items]) => ({ category, items })),
+    [runbooks]
+  );
+  const runbookTreeKey = runbookGroups.map((group) => group.category).join("|");
+  const selectedRunbookTreeId = selectedRunbookId ? `runbook:${selectedRunbookId}` : undefined;
+  const workspaceTree = useMemo(() => buildWorkspaceTree(files), [files]);
+  const workspaceTreeKey = files.map((file) => file.path).join("|");
+  const workspaceDefaultExpandedIds = useMemo(() => collectFolderIds(workspaceTree), [workspaceTree]);
+  const selectedFileTreeId = selectedPath ? `file:${selectedPath}` : undefined;
+  const previewData = useMemo(
+    () => [
+      {
+        language: selectedPath || "preview",
+        filename: selectedPath || "Workspace preview",
+        code: preview
+      }
+    ],
+    [preview, selectedPath]
+  );
   const hasModels = modelsReachable && models.length > 0;
   const modelOptions = hasModels ? models : defaultModel ? [defaultModel] : [];
   const lastMessageIsAssistant = messages.at(-1)?.role === "assistant";
@@ -350,6 +543,21 @@ export function AppNext() {
       );
     } catch (err) {
       notifyError(err, "Models failed");
+    }
+  }, []);
+
+  const loadModelSettings = useCallback(async () => {
+    try {
+      const data = await api.modelSettings();
+      setModelSettings(data.settings);
+      setModelForm({
+        provider: data.settings.provider || "ollama",
+        model: data.settings.model || "",
+        base_url: data.settings.base_url || "",
+        api_key: ""
+      });
+    } catch (err) {
+      notifyError(err, "Model settings failed");
     }
   }, []);
 
@@ -393,8 +601,9 @@ export function AppNext() {
 
   useEffect(() => {
     loadModels();
+    loadModelSettings();
     refreshDashboard();
-  }, [loadModels, refreshDashboard]);
+  }, [loadModels, loadModelSettings, refreshDashboard]);
 
   useEffect(() => {
     if (!selectedRunbook) return;
@@ -580,6 +789,24 @@ export function AppNext() {
     }
   }
 
+  const startInspectorResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = inspectorWidth;
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const viewportMax = Math.max(MIN_INSPECTOR_WIDTH, window.innerWidth - 560);
+      const maxWidth = Math.min(MAX_INSPECTOR_WIDTH, viewportMax);
+      const nextWidth = startWidth - (moveEvent.clientX - startX);
+      setInspectorWidth(Math.min(maxWidth, Math.max(MIN_INSPECTOR_WIDTH, nextWidth)));
+    };
+    const onPointerUp = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+  }, [inspectorWidth]);
+
   async function renderRunbook(runNow = false) {
     if (!selectedRunbook) return;
     try {
@@ -604,8 +831,37 @@ export function AppNext() {
     }
   }
 
+  async function saveModelSettings() {
+    setModelSettingsSaving(true);
+    try {
+      const data = await api.updateModelSettings({
+        provider: modelForm.provider,
+        model: modelForm.model,
+        base_url: modelForm.base_url,
+        api_key: modelForm.api_key.trim() ? modelForm.api_key : null,
+        keep_existing_api_key: !modelForm.api_key.trim() && Boolean(modelSettings?.api_key_set)
+      });
+      setModelSettings(data.settings);
+      setModelForm({
+        provider: data.settings.provider || "ollama",
+        model: data.settings.model || "",
+        base_url: data.settings.base_url || "",
+        api_key: ""
+      });
+      notifySuccess("Model backend saved");
+      await Promise.all([loadModels(), refreshDashboard()]);
+    } catch (err) {
+      notifyError(err, "Model settings failed");
+    } finally {
+      setModelSettingsSaving(false);
+    }
+  }
+
   return (
-    <div className="dark grid h-screen grid-cols-1 overflow-hidden bg-background text-foreground md:grid-cols-[280px_minmax(0,1fr)] lg:grid-cols-[280px_minmax(0,1fr)_420px]">
+    <div
+      className="governance-shell dark grid h-screen grid-cols-1 overflow-hidden bg-background text-foreground md:grid-cols-[280px_minmax(0,1fr)]"
+      style={{ "--inspector-width": `${inspectorWidth}px` } as CSSProperties}
+    >
       <aside className="hidden border-r bg-muted/20 md:flex md:flex-col">
         <div className="flex h-14 items-center gap-2 border-b px-3">
           <span className="flex size-8 items-center justify-center rounded-md bg-primary text-primary-foreground">
@@ -667,52 +923,6 @@ export function AppNext() {
                 )}
               </div>
             </section>
-
-            <Separator />
-
-            <section>
-              <h2 className="mb-2 text-xs font-medium uppercase text-muted-foreground">Runbooks</h2>
-              <Select value={selectedRunbookId ?? ""} onValueChange={setSelectedRunbookId}>
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Choose runbook" />
-                </SelectTrigger>
-                <SelectContent>
-                  {runbooks.map((runbook) => (
-                    <SelectItem key={runbook.id} value={runbook.id}>
-                      {runbook.title}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {selectedRunbook ? (
-                <div className="mt-3 space-y-2">
-                  <p className="text-xs text-muted-foreground">{selectedRunbook.description}</p>
-                  {selectedRunbook.variables.map((variable) => (
-                    <label key={variable.name} className="block space-y-1">
-                      <span className="text-xs text-muted-foreground">{variable.label}</span>
-                      <Input
-                        value={runbookValues[variable.name] || ""}
-                        onChange={(event) =>
-                          setRunbookValues((current) => ({
-                            ...current,
-                            [variable.name]: event.currentTarget.value
-                          }))
-                        }
-                      />
-                    </label>
-                  ))}
-                  <div className="flex gap-2">
-                    <Button size="sm" variant="outline" onClick={() => renderRunbook(false)}>
-                      Attach
-                    </Button>
-                    <Button size="sm" onClick={() => renderRunbook(true)}>
-                      <Play className="size-3.5" />
-                      Run
-                    </Button>
-                  </div>
-                </div>
-              ) : null}
-            </section>
           </div>
         </ScrollArea>
       </aside>
@@ -752,6 +962,14 @@ export function AppNext() {
                 <span className="hidden sm:inline">Retry models</span>
               </Button>
             ) : null}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setInspectorTab("settings")}
+              aria-label="Model backend settings"
+            >
+              <Settings className="size-4" />
+            </Button>
             <Button
               variant="outline"
               size="sm"
@@ -846,23 +1064,30 @@ export function AppNext() {
                 onChange={(event) => setInput(event.currentTarget.value)}
                 placeholder="Ask the orchestrator..."
               />
-              <PromptInputFooter>
-                <PromptInputTools>
-                  <span className="text-xs text-muted-foreground">
-                    {conversationId ? "Threaded" : "New thread"}
-                  </span>
-                </PromptInputTools>
-                <PromptInputSubmit disabled={busy || !input.trim()} status={status} />
-              </PromptInputFooter>
             </PromptInputBody>
+            <PromptInputFooter>
+              <PromptInputTools>
+                <span className="text-xs text-muted-foreground">
+                  {conversationId ? "Threaded" : "New thread"}
+                </span>
+              </PromptInputTools>
+              <PromptInputSubmit disabled={busy || !input.trim()} status={status} />
+            </PromptInputFooter>
           </PromptInput>
         </div>
       </main>
 
-      <aside className="hidden min-w-0 border-l bg-muted/20 lg:flex lg:flex-col">
-        <Tabs defaultValue="timeline" className="flex min-h-0 flex-1 flex-col">
+      <aside className="relative hidden min-w-0 border-l bg-muted/20 lg:flex lg:flex-col">
+        <div
+          className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize touch-none hover:bg-ring/30"
+          onPointerDown={startInspectorResize}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize inspector"
+        />
+        <Tabs value={inspectorTab} onValueChange={setInspectorTab} className="flex min-h-0 flex-1 flex-col">
           <div className="border-b p-3">
-            <TabsList className="grid w-full grid-cols-5">
+            <TabsList className="grid w-full grid-cols-7">
               <TabsTrigger value="timeline" aria-label="Timeline">
                 <Activity className="size-4" />
               </TabsTrigger>
@@ -872,8 +1097,14 @@ export function AppNext() {
               <TabsTrigger value="workspace" aria-label="Workspace">
                 <FileSearch className="size-4" />
               </TabsTrigger>
+              <TabsTrigger value="runbooks" aria-label="Runbooks">
+                <BookOpen className="size-4" />
+              </TabsTrigger>
               <TabsTrigger value="health" aria-label="Health">
                 <HeartPulse className="size-4" />
+              </TabsTrigger>
+              <TabsTrigger value="settings" aria-label="Settings">
+                <Settings className="size-4" />
               </TabsTrigger>
               <TabsTrigger value="approvals" aria-label="Approvals">
                 <ShieldCheck className="size-4" />
@@ -907,24 +1138,54 @@ export function AppNext() {
                   <Search className="size-4" />
                 </Button>
               </div>
-              <div className="grid grid-cols-[150px_minmax(0,1fr)] gap-2">
-                <div className="space-y-1">
-                  {files.slice(0, 24).map((file) => (
-                    <button
-                      key={file.path}
-                      type="button"
-                      className={`block w-full truncate rounded-md px-2 py-1.5 text-left text-xs ${
-                        selectedPath === file.path ? "bg-accent text-accent-foreground" : "hover:bg-accent/60"
-                      }`}
-                      onClick={() => selectFile(file.path)}
-                    >
-                      {file.path}
-                    </button>
-                  ))}
+              <div className="grid min-h-[520px] grid-cols-[minmax(240px,0.9fr)_minmax(360px,1.5fr)] gap-3">
+                <div className="min-h-0 overflow-hidden rounded-md border bg-card">
+                  <TreeProvider
+                    key={workspaceTreeKey}
+                    defaultExpandedIds={workspaceDefaultExpandedIds}
+                    selectedIds={selectedFileTreeId ? [selectedFileTreeId] : []}
+                    onSelectionChange={(ids) => {
+                      const path = ids.find((id) => id.startsWith("file:"))?.slice("file:".length);
+                      if (path) {
+                        selectFile(path);
+                      }
+                    }}
+                    indent={18}
+                    className="h-full"
+                  >
+                    <TreeView className="max-h-[520px] overflow-auto p-1.5">
+                      {workspaceTree.length ? (
+                        <WorkspaceTreeItems nodes={workspaceTree} />
+                      ) : (
+                        <EmptyLine>No workspace files found.</EmptyLine>
+                      )}
+                    </TreeView>
+                  </TreeProvider>
                 </div>
-                <pre className="min-h-[260px] overflow-auto rounded-md border bg-background p-3 text-xs text-muted-foreground">
-                  {preview}
-                </pre>
+                <CodeBlock
+                  data={previewData}
+                  value={previewData[0].language}
+                  className="min-h-[520px] bg-background"
+                >
+                  <CodeBlockHeader>
+                    <CodeBlockFilename value={previewData[0].language}>
+                      {previewData[0].filename}
+                    </CodeBlockFilename>
+                    <CodeBlockCopyButton />
+                  </CodeBlockHeader>
+                  <CodeBlockBody className="h-[calc(520px-38px)] overflow-auto">
+                    {(item) => (
+                      <CodeBlockItem key={item.language} value={item.language}>
+                        <CodeBlockContent
+                          language={detectLanguage(item.filename)}
+                          syntaxHighlighting={Boolean(selectedPath)}
+                        >
+                          {item.code}
+                        </CodeBlockContent>
+                      </CodeBlockItem>
+                    )}
+                  </CodeBlockBody>
+                </CodeBlock>
               </div>
               <div className="flex gap-2">
                 <Button size="sm" variant="outline" onClick={attachSelectedFile} disabled={!selectedPath}>
@@ -953,6 +1214,200 @@ export function AppNext() {
                   </div>
                 ))}
               </div>
+            </TabsContent>
+
+            <TabsContent value="runbooks" className="m-0 space-y-3 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h2 className="text-sm font-semibold">Runbooks</h2>
+                  <p className="text-xs text-muted-foreground">
+                    Prepare reusable prompts, then attach them to the composer or run immediately.
+                  </p>
+                </div>
+                <Badge variant="secondary">{runbooks.length}</Badge>
+              </div>
+              <div className="grid min-h-[420px] grid-cols-[minmax(160px,0.8fr)_minmax(240px,1.2fr)] gap-3">
+                <div className="min-h-0 overflow-hidden rounded-md border bg-card">
+                  <TreeProvider
+                    key={runbookTreeKey}
+                    defaultExpandedIds={runbookGroups.map((group) => `category:${group.category}`)}
+                    selectedIds={selectedRunbookTreeId ? [selectedRunbookTreeId] : []}
+                    onSelectionChange={(ids) => {
+                      const runbookId = ids.find((id) => id.startsWith("runbook:"))?.slice("runbook:".length);
+                      if (runbookId) {
+                        setSelectedRunbookId(runbookId);
+                      }
+                    }}
+                    indent={18}
+                    className="h-full"
+                  >
+                    <TreeView className="max-h-[420px] overflow-auto p-1.5">
+                      {runbookGroups.map((group, groupIndex) => (
+                        <TreeNode
+                          key={group.category}
+                          nodeId={`category:${group.category}`}
+                          isLast={groupIndex === runbookGroups.length - 1}
+                        >
+                          <TreeNodeTrigger className="py-1.5">
+                            <TreeExpander hasChildren />
+                            <TreeIcon hasChildren />
+                            <TreeLabel className="text-xs uppercase tracking-wide text-muted-foreground">
+                              {group.category}
+                            </TreeLabel>
+                          </TreeNodeTrigger>
+                          <TreeNodeContent hasChildren>
+                            {group.items.map((runbook, itemIndex) => (
+                              <TreeNode
+                                key={runbook.id}
+                                nodeId={`runbook:${runbook.id}`}
+                                level={1}
+                                isLast={itemIndex === group.items.length - 1}
+                                parentPath={[groupIndex === runbookGroups.length - 1]}
+                              >
+                                <TreeNodeTrigger className="py-1.5">
+                                  <TreeExpander />
+                                  <TreeIcon />
+                                  <TreeLabel>{runbook.title}</TreeLabel>
+                                </TreeNodeTrigger>
+                              </TreeNode>
+                            ))}
+                          </TreeNodeContent>
+                        </TreeNode>
+                      ))}
+                    </TreeView>
+                  </TreeProvider>
+                </div>
+
+                <div className="min-w-0 rounded-md border bg-card">
+                  {selectedRunbook ? (
+                    <div className="flex h-full min-h-[420px] flex-col">
+                      <div className="border-b p-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-semibold">{selectedRunbook.title}</p>
+                            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                              {selectedRunbook.description}
+                            </p>
+                          </div>
+                          <Badge variant="outline">{selectedRunbook.variables.length}</Badge>
+                        </div>
+                      </div>
+                      <div className="min-h-0 flex-1 space-y-3 overflow-auto p-3">
+                        {selectedRunbook.variables.map((variable) => (
+                          <label key={variable.name} className="block space-y-1.5">
+                            <span className="flex items-center justify-between gap-2 text-xs font-medium text-muted-foreground">
+                              <span>{variable.label}</span>
+                              {variable.required ? <span>Required</span> : null}
+                            </span>
+                            <Textarea
+                              value={runbookValues[variable.name] || ""}
+                              onChange={(event) =>
+                                setRunbookValues((current) => ({
+                                  ...current,
+                                  [variable.name]: event.currentTarget.value
+                                }))
+                              }
+                              rows={variable.multiline ? 4 : 2}
+                              className="min-h-[72px] resize-y text-sm leading-5"
+                            />
+                            {variable.description ? (
+                              <span className="block text-xs leading-5 text-muted-foreground">
+                                {variable.description}
+                              </span>
+                            ) : null}
+                          </label>
+                        ))}
+                      </div>
+                      <div className="flex justify-end gap-2 border-t p-3">
+                        <Button size="sm" variant="outline" onClick={() => renderRunbook(false)}>
+                          Attach
+                        </Button>
+                        <Button size="sm" onClick={() => renderRunbook(true)}>
+                          <Play className="size-3.5" />
+                          Run
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-3">
+                      <EmptyLine>No runbook selected.</EmptyLine>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="settings" className="m-0 space-y-3 p-3">
+              <Card className="rounded-md shadow-none">
+                <CardHeader className="p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <CardTitle className="text-sm">Model backend</CardTitle>
+                      <CardDescription>
+                        Switch between local Ollama and an OpenAI-compatible endpoint.
+                      </CardDescription>
+                    </div>
+                    <Button
+                      size="sm"
+                      onClick={saveModelSettings}
+                      disabled={modelSettingsSaving || !modelForm.model.trim()}
+                    >
+                      {modelSettingsSaving ? <Loader2 className="size-4 animate-spin" /> : <Settings className="size-4" />}
+                      Save
+                    </Button>
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-3 p-3 pt-0">
+                  <label className="block space-y-1">
+                    <span className="text-xs text-muted-foreground">Provider</span>
+                    <Select
+                      value={modelForm.provider}
+                      onValueChange={(provider) => setModelForm((current) => ({ ...current, provider }))}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="ollama">Ollama</SelectItem>
+                        <SelectItem value="openai">OpenAI-compatible</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </label>
+                  <label className="block space-y-1">
+                    <span className="text-xs text-muted-foreground">Model</span>
+                    <Input
+                      value={modelForm.model}
+                      onChange={(event) =>
+                        setModelForm((current) => ({ ...current, model: event.currentTarget.value }))
+                      }
+                      placeholder={modelForm.provider === "openai" ? "openai/gpt-4o-mini" : "qwen3:1.7b"}
+                    />
+                  </label>
+                  <label className="block space-y-1">
+                    <span className="text-xs text-muted-foreground">Base URL</span>
+                    <Input
+                      value={modelForm.base_url}
+                      onChange={(event) =>
+                        setModelForm((current) => ({ ...current, base_url: event.currentTarget.value }))
+                      }
+                      disabled={modelForm.provider !== "openai"}
+                      placeholder="https://openrouter.ai/api/v1"
+                    />
+                  </label>
+                  <label className="block space-y-1">
+                    <span className="text-xs text-muted-foreground">API key</span>
+                    <Input
+                      type="password"
+                      value={modelForm.api_key}
+                      onChange={(event) =>
+                        setModelForm((current) => ({ ...current, api_key: event.currentTarget.value }))
+                      }
+                      disabled={modelForm.provider !== "openai"}
+                      placeholder={modelSettings?.api_key_masked || "sk-..."}
+                    />
+                  </label>
+                </CardContent>
+              </Card>
             </TabsContent>
 
             <TabsContent value="health" className="m-0 space-y-3 p-3">
