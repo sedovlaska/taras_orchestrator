@@ -1,12 +1,8 @@
 /*
  * Tailwind v4 entry for the shadcn/ui toolchain.
  *
- * COEXISTENCE WITH MANTINE:
- * Tailwind's Preflight resets base elements (button, h1-h6, ul, etc.) which
- * would clobber the existing Mantine shell. We therefore import the Tailwind
- * theme + utilities but intentionally DO NOT import Preflight. shadcn/ui
- * components depend on utility classes and the design tokens below, not on the
- * Preflight reset, so the current Mantine UI stays visually unchanged.
+ * Preflight remains disabled because this app now uses explicit shadcn/ui
+ * component styling and inherited resets would be broad churn for this cleanup.
  */
 @layer theme, base, components, utilities;
 

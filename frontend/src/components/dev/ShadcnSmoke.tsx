@@ -25,8 +25,7 @@ import {
  *
  * NOT part of the product UI. It is rendered only when the app is opened with
  * `?shadcn-smoke` in the URL (see main.tsx). Its sole purpose is to prove that
- * Tailwind utilities + shadcn primitives compile and render, and that they
- * visually coexist with the Mantine shell during the migration.
+ * Tailwind utilities + shadcn primitives compile and render.
  */
 export function ShadcnSmoke() {
   const [name, setName] = useState("");
@@ -46,7 +45,7 @@ export function ShadcnSmoke() {
           <CardHeader>
             <CardTitle>Toolchain check</CardTitle>
             <CardDescription>
-              Tailwind v4 + shadcn primitives rendering alongside Mantine.
+              Tailwind v4 + shadcn primitives are rendering.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">

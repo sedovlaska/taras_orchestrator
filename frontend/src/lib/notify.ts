@@ -3,9 +3,7 @@ import { toast } from "sonner";
 /**
  * Shared toast helpers backed by sonner.
  *
- * Migrated from `@mantine/notifications`. Both the current Mantine shell and
- * future shadcn/ui screens import these so toasts stay consistent across the
- * migration. The <Toaster/> is mounted once in main.tsx.
+ * The <Toaster/> is mounted once in main.tsx.
  */
 
 export function notifyError(error: unknown, title = "Request failed") {
