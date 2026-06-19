@@ -24,6 +24,11 @@ from orchestrator.evals import diff_against_baseline, list_eval_cases, run_eval_
 from orchestrator.agno_agents import TOOL_GATED_MARKER
 from orchestrator.ollama import list_ollama_models
 from orchestrator.policy import APPROVAL_GRANTS_ENV, current_policy, warn_if_gate_disabled
+from orchestrator.policy_simulation import (
+    CandidatePolicyPatch,
+    build_candidate_policy,
+    simulate_policy,
+)
 from orchestrator.routing import RoutingResult, route_request, should_use_local_system_status
 from orchestrator.runbooks import get_runbook, list_runbooks, render_runbook
 from orchestrator.run_history import RunHistoryStore
@@ -90,6 +95,21 @@ class ContextPackRequest(BaseModel):
     query: str | None = None
     search_limit: int = 20
     max_chars: int | None = None
+
+
+class PolicySimulationCandidateRequest(BaseModel):
+    mode: str | None = None
+    allowed_risks: list[str] | None = None
+    allowed_tools: list[str] | None = None
+    denied_tools: list[str] | None = None
+    approval_required_risks: list[str] | None = None
+
+
+class PolicySimulationRequest(BaseModel):
+    candidate: PolicySimulationCandidateRequest = Field(default_factory=PolicySimulationCandidateRequest)
+    source: str = "history"
+    history_limit: int = Field(default=50, ge=1, le=200)
+    include_unchanged: bool = False
 
 
 def route_agents(message: str) -> list[str]:
@@ -899,6 +919,39 @@ async def tools():
         decision = policy.evaluate(get_tool(tool["id"]))
         inventory.append({**tool, "policy": decision.as_dict()})
     return {"tools": inventory}
+
+
+@app.post("/policy/simulate")
+async def policy_simulation(request: PolicySimulationRequest):
+    base_policy = current_policy()
+    candidate = request.candidate
+    candidate_policy = build_candidate_policy(
+        CandidatePolicyPatch(
+            mode=candidate.mode,
+            allowed_risks=set(candidate.allowed_risks) if candidate.allowed_risks is not None else None,
+            allowed_tools=set(candidate.allowed_tools) if candidate.allowed_tools is not None else None,
+            denied_tools=set(candidate.denied_tools) if candidate.denied_tools is not None else None,
+            approval_required_risks=(
+                set(candidate.approval_required_risks)
+                if candidate.approval_required_risks is not None
+                else None
+            ),
+        ),
+        base_policy=base_policy,
+    )
+    try:
+        return {
+            "simulation": simulate_policy(
+                run_history,
+                candidate_policy,
+                source=request.source,
+                history_limit=request.history_limit,
+                include_unchanged=request.include_unchanged,
+                base_policy=base_policy,
+            )
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/workspace/files")

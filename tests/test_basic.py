@@ -75,6 +75,75 @@ def test_policy_blocks_project_path_escape():
         policy.require_project_path("../outside")
 
 
+def test_policy_simulation_reports_eval_allow_to_deny_flips():
+    from orchestrator.policy_simulation import CandidatePolicyPatch, build_candidate_policy, simulate_policy
+
+    candidate = build_candidate_policy(
+        CandidatePolicyPatch(denied_tools={"code.lint_code"}),
+        base_policy=ToolPolicy(allowed_risks={"low", "medium"}),
+    )
+
+    result = simulate_policy(
+        RunHistoryStore(":memory:"),
+        candidate,
+        source="evals",
+        base_policy=ToolPolicy(allowed_risks={"low", "medium"}),
+    )
+
+    assert result["summary"]["allow_to_deny"] >= 1
+    assert any(
+        diff["tool_id"] == "code.lint_code" and diff["flip"] == "allow_to_deny"
+        for sample in result["results"]
+        for diff in sample["tool_diffs"]
+    )
+
+
+def test_policy_simulation_replays_run_history(tmp_path):
+    from orchestrator.policy_simulation import CandidatePolicyPatch, build_candidate_policy, simulate_policy
+
+    store = RunHistoryStore(tmp_path / "runs.sqlite3")
+    route = route_request("please lint this code").as_dict()
+    run = store.create_run("please lint this code", route)
+    store.append_event(run["id"], "tool_start", {"tool_id": "code.lint_code"})
+    store.complete_run(run["id"], "done")
+    candidate = build_candidate_policy(
+        CandidatePolicyPatch(denied_tools={"code.lint_code"}),
+        base_policy=ToolPolicy(allowed_risks={"low", "medium"}),
+    )
+
+    result = simulate_policy(
+        store,
+        candidate,
+        source="history",
+        base_policy=ToolPolicy(allowed_risks={"low", "medium"}),
+    )
+
+    assert result["summary"]["inputs"] == 1
+    assert result["summary"]["inputs_with_changes"] == 1
+    assert result["results"][0]["metadata"]["run_id"] == run["id"]
+
+
+def test_policy_simulation_api_validates_source_and_reports_flips(tmp_path, monkeypatch):
+    import orchestrator.server as server
+
+    store = RunHistoryStore(tmp_path / "runs.sqlite3")
+    run = store.create_run("please lint this code", route_request("please lint this code").as_dict())
+    store.complete_run(run["id"], "done")
+    monkeypatch.setattr(server, "run_history", store)
+    client = TestClient(server.app)
+
+    response = client.post(
+        "/policy/simulate",
+        json={"candidate": {"denied_tools": ["code.lint_code"]}},
+    )
+    invalid = client.post("/policy/simulate", json={"source": "not-real"})
+
+    assert response.status_code == 200
+    payload = response.json()["simulation"]
+    assert payload["summary"]["allow_to_deny"] == 1
+    assert invalid.status_code == 422
+
+
 def test_command_runner_executes_allowed_command_and_truncates_output():
     result = run_command(
         [sys.executable, "-c", "print('x' * 100)"],
