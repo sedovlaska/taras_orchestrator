@@ -25,6 +25,9 @@ export type AgentStatus = {
 
 export type RunSummary = {
   total_runs?: number;
+  avg_latency_ms?: number | null;
+  p95_latency_ms?: number | null;
+  total_tokens?: number;
   by_status?: Array<{ status: string; count: number }>;
   by_agent?: Array<{ agent: string; count: number }>;
   approvals?: Array<{ status: string; count: number }>;
@@ -38,6 +41,10 @@ export type RunListItem = {
   intent: string;
   agents: string[];
   created_at: string;
+  latency_ms?: number | null;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  total_tokens?: number | null;
 };
 
 export type TimelineEvent = {

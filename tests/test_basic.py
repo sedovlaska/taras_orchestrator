@@ -621,7 +621,9 @@ def test_run_history_store_persists_runs_and_events(tmp_path):
 
     assert runs[0]["id"] == run["id"]
     assert runs[0]["answer"] == "done"
+    assert runs[0]["latency_ms"] is not None
     assert detail["route"]["agents"] == ["code"]
+    assert detail["latency_ms"] is not None
     assert events == [stored_event]
     assert events[0]["data"]["intent"] == "code"
 
@@ -641,6 +643,34 @@ def test_run_history_summary_counts_status_agents_events_and_errors(tmp_path):
     assert summary["by_agent"] == [{"agent": "code", "count": 1}]
     assert any(row["event"] == "runner_error" for row in summary["by_event"])
     assert summary["recent_errors"][0]["data"]["message"] == "boom"
+
+
+def test_run_history_summary_aggregates_latency_and_tokens(tmp_path):
+    store = RunHistoryStore(tmp_path / "runs.sqlite3")
+    route = route_request("cpu status").as_dict()
+    first = store.create_run("cpu status", route)
+    second = store.create_run("disk usage", route)
+
+    store.complete_run(
+        first["id"],
+        "done",
+        latency_ms=100,
+        token_usage={"prompt_tokens": 5, "completion_tokens": 10},
+    )
+    store.complete_run(
+        second["id"],
+        "done",
+        latency_ms=200,
+        token_usage={"prompt_tokens": 7, "completion_tokens": 8, "total_tokens": 15},
+    )
+
+    summary = store.summary()
+    runs = store.list_runs()
+
+    assert summary["avg_latency_ms"] == 150
+    assert summary["p95_latency_ms"] == 200
+    assert summary["total_tokens"] == 30
+    assert runs[0]["total_tokens"] == 15
 
 
 def test_chat_api_records_run_history(tmp_path, monkeypatch):
@@ -686,6 +716,9 @@ def test_run_summary_api_uses_current_history_store(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert payload["total_runs"] == 1
     assert payload["by_status"] == [{"status": "completed", "count": 1}]
+    assert payload["avg_latency_ms"] is not None
+    assert payload["p95_latency_ms"] is not None
+    assert payload["total_tokens"] == 0
 
 
 def test_run_trace_export_includes_route_policy_and_timeline(tmp_path):
@@ -1396,6 +1429,47 @@ def test_ai_sdk_stream_multi_chunk_yields_multiple_text_deltas(tmp_path, monkeyp
     # Exactly one text block opened and closed.
     assert [p["type"] for p in parts].count("text-start") == 1
     assert [p["type"] for p in parts].count("text-end") == 1
+
+
+def test_ai_sdk_stream_persists_token_usage_when_reported(tmp_path, monkeypatch):
+    import orchestrator.server as server
+
+    store = RunHistoryStore(tmp_path / "runs.sqlite3")
+    monkeypatch.setattr(server, "run_history", store)
+    _patch_stream_orchestrator(
+        server,
+        monkeypatch,
+        [
+            ("text", {"delta": "ok"}),
+            (
+                "done",
+                {
+                    "answer": "ok",
+                    "token_usage": {
+                        "prompt_tokens": 3,
+                        "completion_tokens": 4,
+                        "total_tokens": 7,
+                    },
+                },
+            ),
+        ],
+    )
+    client = TestClient(server.app)
+
+    response = client.post("/chat/stream?protocol=ai-sdk", json={"message": "write docs about python"})
+    run_id = next(
+        part["data"]["run_id"]
+        for part in _ai_sdk_frames(response.text)
+        if part["type"] == "data-trace" and part["data"]["event"] == "route"
+    )
+    run = store.get_run(run_id)
+    summary = store.summary()
+
+    assert response.status_code == 200
+    assert run["prompt_tokens"] == 3
+    assert run["completion_tokens"] == 4
+    assert run["total_tokens"] == 7
+    assert summary["total_tokens"] == 7
 
 
 def test_ai_sdk_stream_governance_event_becomes_data_trace(tmp_path, monkeypatch):
