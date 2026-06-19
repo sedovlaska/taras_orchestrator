@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import psutil
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -1309,12 +1309,8 @@ async def chat(request: ChatRequest):
     )
 
 
-def _sse(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-
 async def _ai_sdk_event_generator(request: ChatRequest, model: str | None, conversation_id: str | None):
-    """Emit the run as an AI SDK v5 UI-message-stream (selected by ?protocol=ai-sdk).
+    """Emit the run as an AI SDK v5 UI-message-stream.
 
     Governance events become TRANSIENT ``data-trace`` parts; ``approval_required``
     becomes a PERSISTENT ``data-approval`` part keyed by approval id; model output
@@ -1395,7 +1391,7 @@ async def _ai_sdk_event_generator(request: ChatRequest, model: str | None, conve
 
 
 @app.post("/chat/stream")
-async def chat_stream(request: ChatRequest, http_request: Request):
+async def chat_stream(request: ChatRequest):
     conversation_id = request.conversation_id
     if conversation_id and conversation_store.get_conversation(conversation_id) is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -1404,77 +1400,11 @@ async def chat_stream(request: ChatRequest, http_request: Request):
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    if http_request.query_params.get("protocol") == "ai-sdk":
-        return StreamingResponse(
-            _ai_sdk_event_generator(request, model, conversation_id),
-            media_type="text/event-stream",
-            headers={
-                ai_sdk_stream.UI_MESSAGE_STREAM_HEADER: ai_sdk_stream.UI_MESSAGE_STREAM_VERSION,
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    async def event_generator():
-        team_input = conversation_context(conversation_id, request.message)
-        route = route_request(request.message)
-        run = run_history.create_run(
-            request.message, route.as_dict(), conversation_id=conversation_id, model=model
-        )
-        if conversation_id:
-            conversation_store.append_message(conversation_id, "user", request.message)
-        initial_events = initial_run_events(route)
-        for event in initial_events:
-            run_history.append_event(run["id"], str(event["event"]), dict(event["data"]))
-            data = dict(event["data"])
-            if event["event"] == "route":
-                data["run_id"] = run["id"]
-            yield _sse(str(event["event"]), data)
-        approvals = create_required_approvals(run["id"], route)
-        if approvals:
-            answer = approval_waiting_answer(approvals)
-            run_history.complete_run(run["id"], answer, status="waiting_approval")
-            for approval in approvals:
-                yield _sse("approval_required", approval_required_event(approval)["data"])
-            yield _sse(
-                "done",
-                {
-                    "answer": answer,
-                    "intent": route.intent,
-                    "agents": route.agents,
-                    "route": route.as_dict(),
-                    "run_id": run["id"],
-                    "status": "waiting_approval",
-                },
-            )
-            return
-        await asyncio.sleep(0.05)
-        events: list[RunEvent] = []
-        answer = await asyncio.to_thread(run_orchestrator, team_input, route, events, model)
-        if conversation_id:
-            conversation_store.append_message(conversation_id, "assistant", answer)
-        for event in events:
-            run_history.append_event(run["id"], str(event["event"]), dict(event["data"]))
-            yield _sse(str(event["event"]), dict(event["data"]))
-        done_data = {
-            "answer": answer,
-            "intent": route.intent,
-            "agents": route.agents,
-            "route": route.as_dict(),
-            "run_id": run["id"],
-        }
-        run_history.append_event(run["id"], "done", done_data)
-        run_history.complete_run(run["id"], answer)
-        yield _sse(
-            "done",
-            done_data,
-        )
-
     return StreamingResponse(
-        event_generator(),
+        _ai_sdk_event_generator(request, model, conversation_id),
         media_type="text/event-stream",
         headers={
+            ai_sdk_stream.UI_MESSAGE_STREAM_HEADER: ai_sdk_stream.UI_MESSAGE_STREAM_VERSION,
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",

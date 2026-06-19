@@ -2,8 +2,8 @@
 
 This translates the orchestrator's native SSE vocabulary (route/classify/
 policy_decision/runner_*/tool_*/done and approval_required) into the Vercel AI
-SDK v5 UI-message-stream protocol so a shadcn + AI SDK frontend can consume
-``/chat/stream?protocol=ai-sdk`` directly.
+SDK v5 UI-message-stream protocol consumed by the shadcn + AI SDK frontend at
+``/chat/stream``.
 
 Protocol (verified against https://ai-sdk.dev/docs/ai-sdk-ui/stream-protocol and
 https://ai-sdk.dev/docs/ai-sdk-ui/streaming-data):

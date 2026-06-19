@@ -131,13 +131,6 @@ export type Runbook = {
   variables: RunbookVariable[];
 };
 
-export type ChatMessage = {
-  id: string;
-  role: "system" | "user" | "assistant" | "error";
-  content: string;
-  agents?: string[];
-};
-
 export type Conversation = {
   id: string;
   title: string;
@@ -145,7 +138,7 @@ export type Conversation = {
   updated_at: string;
 };
 
-// --- AI SDK v5 UI-message-stream data parts (?protocol=ai-sdk) ---
+// --- AI SDK v5 UI-message-stream data parts ---
 // TRANSIENT governance telemetry: `data-trace` parts carry one orchestrator
 // event each (route/classify/policy_decision/runner_*/tool_*/done). Shape
 // mirrors the SSE TimelineEvent payload, with the event name folded into `data`.

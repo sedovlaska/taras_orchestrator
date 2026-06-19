@@ -103,7 +103,7 @@ import type {
 import { ApprovalCard } from "./ApprovalCard";
 import { RunnerTimeline } from "./RunnerTimeline";
 
-const CHAT_API = "/chat/stream?protocol=ai-sdk";
+const CHAT_API = "/chat/stream";
 
 function lastUserText(messages: UIMessage[]): string {
   for (let i = messages.length - 1; i >= 0; i -= 1) {

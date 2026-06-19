@@ -19,8 +19,7 @@ import type { TraceData } from "@/types";
 
 /**
  * A live, chronological rail of orchestrator steps rendered beside the
- * in-progress assistant turn. Ported from the Mantine `RunnerTimeline` into
- * shadcn's design language: while streaming it stays expanded with a pulsing
+ * in-progress assistant turn. While streaming it stays expanded with a pulsing
  * head; once the run settles (`done`/error/needs-approval) it collapses into a
  * single quiet summary line that can be re-opened to audit the run.
  *
